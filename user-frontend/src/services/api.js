@@ -5,8 +5,12 @@ export const API_BASE =
   import.meta.env.VITE_API_BASE ||
   (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? 'http://localhost:5000/api'
-    : 'https://flowly-finance-backend.onrender.com/api');
-export const SOCKET_BASE = API_BASE.replace(/\/api\/?$/, '');
+    : '/api');
+export const SOCKET_BASE =
+  import.meta.env.VITE_SOCKET_BASE ||
+  (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://localhost:5000'
+    : 'https://16.178.31.55.sslip.io');
 
 const API = axios.create({
   baseURL: API_BASE,
