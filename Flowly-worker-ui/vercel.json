@@ -2,6 +2,10 @@
   "version": 2,
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "http://16.178.31.55/api/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
