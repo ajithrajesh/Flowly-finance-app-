@@ -1,0 +1,326 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap');
+@import 'tailwindcss';
+
+@theme static {
+  --font-heading: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  --color-ink: #201530;
+  --color-muted: #6e677b;
+  --color-subtle: #a19aa8;
+  --color-line: #e7e4dc;
+  --color-surface: #f6f5f1;
+  --color-plum: #241531;
+  --color-plum-deep: #180d24;
+  --color-brand: #5c187b;
+  --color-brand-light: #eee7f4;
+  --color-accent: #8b5cf6;
+  --color-danger: #b23a2e;
+  --color-danger-light: #fadada;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  /* Keep the line-height the existing screens were designed with (Tailwind defaults to 1.5) */
+  html {
+    line-height: normal;
+  }
+  body {
+    @apply bg-surface font-body text-ink antialiased;
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-weight: 700;
+  }
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* ==========================================================================
+   Shared component layer for the worker feature screens
+   (Customers, KYC, Video KYC, Cash, FD, Loans). Built with Tailwind @apply on
+   the theme tokens above, so class names used in the JSX stay the same.
+   ========================================================================== */
+
+/* ---- Surfaces ---- */
+.panel,
+.card,
+.stat-card {
+  @apply rounded-2xl border border-line bg-white shadow-[0_1px_2px_rgba(32,21,48,0.04),0_6px_20px_-8px_rgba(32,21,48,0.08)];
+}
+.panel {
+  @apply mb-4 px-5 py-4.5;
+}
+.card {
+  @apply p-4.5;
+}
+.panel-head {
+  @apply mb-3.5 flex items-center justify-between gap-3;
+}
+.panel-title {
+  @apply font-heading text-[15px] font-semibold tracking-[-0.01em];
+}
+.panel-link {
+  @apply cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-1 text-xs font-semibold text-brand hover:bg-brand-light;
+}
+.grid-2 {
+  @apply grid gap-4 grid-cols-[1.4fr_1fr] max-[1000px]:grid-cols-1;
+}
+.grid-4 {
+  @apply grid grid-cols-4 gap-4 max-[1100px]:grid-cols-2 max-[600px]:grid-cols-1;
+}
+
+/* ---- Stat cards ---- */
+.stat-row {
+  @apply mb-5 grid grid-cols-4 gap-4 max-[1100px]:grid-cols-2 max-[600px]:grid-cols-1;
+}
+.stat-card {
+  @apply p-4.5;
+}
+.stat-card .top {
+  @apply flex items-start justify-between;
+}
+.stat-card .lbl {
+  @apply text-[13px] font-medium text-muted;
+}
+.stat-card .ic {
+  @apply size-8 rounded-[9px] bg-brand-light;
+}
+.stat-card .num {
+  @apply mt-2.5 font-heading text-[28px] leading-none font-bold tracking-[-0.02em];
+}
+.stat-card .delta {
+  @apply mt-1.5 text-xs font-semibold text-[#3e7a22];
+}
+
+/* ---- Tables ---- */
+table {
+  @apply w-full border-collapse;
+}
+th {
+  @apply border-b border-line bg-surface/60 px-4 py-3 text-left text-xs font-semibold text-muted;
+}
+td {
+  @apply border-b border-[#f2f0ea] px-4 py-3.5 text-[13px];
+}
+tr:last-child td {
+  @apply border-b-0;
+}
+tr.clickable {
+  @apply cursor-pointer;
+}
+tr.clickable:hover td {
+  @apply bg-brand-light/40;
+}
+.panel > table th:first-child {
+  @apply rounded-tl-2xl;
+}
+.panel > table th:last-child {
+  @apply rounded-tr-2xl;
+}
+.cell-user {
+  @apply flex items-center gap-2.5 font-medium;
+}
+.avatar {
+  @apply flex size-8 shrink-0 items-center justify-center rounded-full bg-linear-to-br from-brand-light to-[#dccdf0] text-[11px] font-bold text-brand;
+}
+.cell-sub {
+  @apply text-xs text-muted;
+}
+
+/* ---- Badges ---- */
+.badge {
+  @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] leading-none font-semibold;
+}
+.badge::before {
+  content: '';
+  @apply size-1.5 rounded-full bg-current opacity-80;
+}
+.badge-amber {
+  @apply bg-[#fbefd9] text-[#8a5a00];
+}
+.badge-green {
+  @apply bg-[#e4f1dc] text-[#34691c];
+}
+.badge-red {
+  @apply bg-danger-light text-danger;
+}
+.badge-gray {
+  @apply bg-[#edebe5] text-[#5f5e57];
+}
+.badge-purple {
+  @apply bg-brand-light text-brand;
+}
+
+/* ---- Buttons ---- */
+button {
+  font-family: inherit;
+}
+.btn,
+.btn-primary,
+.btn-outline,
+.btn-secondary,
+.btn-outline-dark,
+.btn-danger-outline,
+.btn-ghost {
+  @apply inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] px-4 text-[13px] font-semibold whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed;
+}
+.btn,
+.btn-primary {
+  @apply border border-brand bg-brand text-white shadow-[0_1px_2px_rgba(92,24,123,0.3)] hover:enabled:border-[#4b1166] hover:enabled:bg-[#4b1166] disabled:border-[#cbb9d6] disabled:bg-[#cbb9d6] disabled:shadow-none;
+}
+.btn-outline {
+  @apply border border-brand/40 bg-white text-brand hover:enabled:border-brand hover:enabled:bg-brand-light disabled:opacity-50;
+}
+.btn-secondary {
+  @apply border border-line bg-surface text-ink hover:enabled:bg-[#ece9e0] disabled:opacity-50;
+}
+.btn-outline-dark {
+  @apply border border-line bg-white text-ink hover:enabled:bg-surface disabled:opacity-50;
+}
+.btn-danger-outline {
+  @apply border border-[#e3b3ac] bg-white text-danger hover:enabled:bg-[#fdf3f2] disabled:opacity-50;
+}
+.btn-ghost {
+  @apply border-0 bg-transparent px-2.5 text-muted hover:enabled:bg-surface hover:enabled:text-ink;
+}
+.btn-sm {
+  @apply h-8 rounded-lg px-3 text-xs;
+}
+
+/* ---- Tabs ---- */
+.tabs {
+  @apply mb-4 flex gap-1 rounded-xl bg-[#ece9e0]/70 p-1 w-fit max-w-full overflow-x-auto;
+}
+.tab {
+  @apply cursor-pointer rounded-lg border-0 bg-transparent px-3.5 py-1.5 text-[13px] font-semibold whitespace-nowrap text-muted transition-colors hover:text-ink;
+}
+.tab.active {
+  @apply bg-white text-brand shadow-[0_1px_3px_rgba(32,21,48,0.12)];
+}
+
+/* ---- Key / value rows ---- */
+.kv-row {
+  @apply flex justify-between gap-4 border-b border-[#f2f0ea] py-2.5 text-[13px];
+}
+.kv-row .k {
+  @apply text-muted;
+}
+.kv-row .v {
+  @apply text-right font-semibold;
+}
+
+/* ---- Documents & bars ---- */
+.doc-thumb {
+  @apply mb-2 flex h-24 cursor-pointer items-center justify-center rounded-xl border border-dashed border-[#cfc9d6] bg-surface text-xs text-muted transition-colors hover:border-brand hover:bg-brand-light/50 hover:text-brand;
+}
+.bar-row {
+  @apply mb-2.5 flex items-center gap-2.5;
+}
+.bar-track {
+  @apply h-2 flex-1 overflow-hidden rounded-full bg-[#ece9e0];
+}
+.bar-fill {
+  @apply h-full rounded-full bg-linear-to-r from-brand to-accent;
+}
+
+/* ---- Form fields (both naming schemes used in the screens) ---- */
+input.field,
+select.field,
+textarea.field,
+.form-input,
+.form-select {
+  @apply box-border w-full rounded-[10px] border-[1.5px] border-line bg-white px-3 py-2 text-[13.5px] text-ink transition-[border-color,box-shadow] placeholder:text-subtle hover:border-[#cfc9d6] focus:border-brand focus:ring-4 focus:ring-brand/15 focus:outline-none disabled:bg-surface disabled:text-muted;
+  font-family: inherit;
+}
+.field-label,
+.form-label {
+  @apply mb-1.5 block text-[13px] font-semibold text-ink;
+}
+.field-group,
+.form-group {
+  @apply mb-3.5;
+}
+.field-error {
+  @apply mt-1 text-xs font-medium text-danger;
+}
+
+/* ---- Modals ---- */
+.modal-overlay {
+  @apply fixed inset-0 z-[999] hidden items-center justify-center bg-plum-deep/55 p-4 backdrop-blur-[3px];
+}
+.modal-overlay.open {
+  @apply flex;
+}
+.modal-box,
+.modal-container {
+  @apply max-h-[90vh] w-full overflow-y-auto rounded-2xl bg-white shadow-[0_24px_60px_-12px_rgba(24,13,36,0.4)];
+  animation: modal-in 0.18s ease-out;
+}
+.modal-box {
+  @apply max-w-[420px] p-6;
+}
+.modal-container {
+  @apply max-w-[650px] p-6;
+}
+.modal-title {
+  @apply mb-1 font-heading text-[17px] font-semibold tracking-[-0.01em];
+}
+.modal-sub {
+  @apply mb-4 text-[13px] leading-snug text-muted;
+}
+.modal-actions {
+  @apply mt-5 flex justify-end gap-2;
+}
+.modal-icon {
+  @apply mb-3 flex size-11 items-center justify-center rounded-full text-lg font-bold;
+}
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---- Toast ---- */
+.toast {
+  @apply pointer-events-none fixed bottom-6 left-1/2 z-60 flex -translate-x-1/2 translate-y-5 items-center gap-2.5 rounded-xl bg-plum px-4.5 py-3 text-[13px] font-medium text-white opacity-0 shadow-[0_12px_30px_-8px_rgba(24,13,36,0.5)] transition-all duration-250;
+}
+.toast.show {
+  @apply translate-y-0 opacity-100;
+}
+.toast .dot {
+  @apply size-2 shrink-0 rounded-full bg-[#7cd68a];
+}
+
+/* ---- States ---- */
+.placeholder-panel,
+.loading-panel {
+  @apply py-16 text-center text-sm text-muted;
+}
+.error-banner {
+  @apply mb-3.5 rounded-lg border-l-[3px] border-danger bg-danger-light px-3.5 py-2.5 text-[13px] font-semibold text-danger;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-box,
+  .modal-container {
+    animation: none;
+  }
+  .toast {
+    transition: none;
+  }
+}

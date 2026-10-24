@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.git
+.gitignore
+scratch
+Dockerfile
+docker-compose.yml
+.DS_Store
