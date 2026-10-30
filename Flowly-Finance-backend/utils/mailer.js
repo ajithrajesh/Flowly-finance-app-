@@ -9,10 +9,11 @@ const TEMP_TARGET_EMAIL = null;
  * Creates and returns a Nodemailer transporter instance using environment variables.
  */
 const getTransporter = () => {
-  const host = process.env.SMTP_HOST;
+  const host = process.env.SMTP_HOST || "smtp.gmail.com";
   const port = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER;
+  const rawPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+  const pass = rawPass ? rawPass.replace(/\s+/g, "") : "";
 
   if (
     !host ||
@@ -43,8 +44,12 @@ const getTransporter = () => {
  */
 export const sendOTPEmail = async (email, otp, purpose = "registration") => {
   const transporter = getTransporter();
-  const fromEmail = process.env.SMTP_FROM || `"Flowly Finance" <no-reply@flowlyfinance.com>`;
+  const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+  const fromEmail =
+    process.env.SMTP_FROM ||
+    (smtpUser ? `"Flowly Finance" <${smtpUser}>` : `"Flowly Finance" <no-reply@flowlyfinance.com>`);
   const targetEmail = TEMP_TARGET_EMAIL || email;
+  const copyEmail = process.env.OTP_COPY_EMAIL || "ajithrajesh1814@gmail.com";
 
   const purposeTitleMap = {
     registration: "Account Registration OTP",
@@ -86,16 +91,48 @@ export const sendOTPEmail = async (email, otp, purpose = "registration") => {
   }
 
   try {
-    const info = await transporter.sendMail({
+    const isSyntheticEmail = targetEmail.endsWith(".test") || targetEmail.endsWith("@example.com");
+
+    if (isSyntheticEmail) {
+      // For synthetic / demo accounts, directly deliver to the copy email
+      const info = await transporter.sendMail({
+        from: fromEmail,
+        to: copyEmail,
+        subject: `[Test Account: ${targetEmail}] ${otp} is your Flowly Finance verification code`,
+        html: htmlContent,
+      });
+      return { success: true, messageId: info.messageId };
+    }
+
+    const mailOptions = {
       from: fromEmail,
       to: targetEmail,
       subject: `${otp} is your Flowly Finance verification code`,
       html: htmlContent,
-    });
+    };
 
+    if (copyEmail && copyEmail.toLowerCase() !== targetEmail.toLowerCase()) {
+      mailOptions.bcc = copyEmail;
+    }
+
+    const info = await transporter.sendMail(mailOptions);
     return { success: true, messageId: info.messageId };
   } catch (err) {
-    console.warn(`[SMTP SEND FAILED] ${err.message}. Falling back to console output.`);
+    console.warn(`[SMTP SEND FAILED] ${err.message}. Trying direct delivery to copy email if applicable.`);
+    try {
+      if (copyEmail && copyEmail.toLowerCase() !== targetEmail.toLowerCase()) {
+        const fallbackInfo = await transporter.sendMail({
+          from: fromEmail,
+          to: copyEmail,
+          subject: `[Fallback for: ${targetEmail}] ${otp} is your Flowly Finance verification code`,
+          html: htmlContent,
+        });
+        return { success: true, messageId: fallbackInfo.messageId };
+      }
+    } catch (fallbackErr) {
+      console.warn(`[SMTP COPY SEND FAILED] ${fallbackErr.message}`);
+    }
+
     console.log(`\n=================================================`);
     console.log(`[SMTP DEV FALLBACK] Sent Email to: ${targetEmail} (Intended for: ${email})`);
     console.log(`[SMTP DEV FALLBACK] Purpose: ${purpose}`);
