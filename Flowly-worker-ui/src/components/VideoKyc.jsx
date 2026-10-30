@@ -525,12 +525,20 @@ function CallRoom({ sessionId, onToast, onExit }) {
         };
 
         // 4. Socket.IO signaling — same server, auth via the worker's JWT
-        const socket = io(SOCKET_BASE, { auth: { token: getToken() } });
+        const socket = io(SOCKET_BASE, {
+          auth: { token: getToken() },
+          transports: ['websocket', 'polling'],
+          reconnectionAttempts: 5,
+        });
         socketRef.current = socket;
 
         socket.on('connect_error', (err) => {
           if (!cancelled) {
-            setErrorMsg(err.message || 'Could not connect to the call server');
+            console.error('Socket connect_error:', err);
+            const msg = err.message === 'xhr poll error'
+              ? 'Could not connect to video server. Please ensure HTTPS/WSS port 443 is open on the server.'
+              : (err.message || 'Could not connect to the call server');
+            setErrorMsg(msg);
             setPhase('error');
           }
         });
