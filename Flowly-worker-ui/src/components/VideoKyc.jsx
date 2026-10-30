@@ -535,8 +535,14 @@ function CallRoom({ sessionId, onToast, onExit }) {
         socket.on('connect_error', (err) => {
           if (!cancelled) {
             console.error('Socket connect_error:', err);
-            const msg = err.message === 'xhr poll error'
-              ? 'Could not connect to video server. Please ensure HTTPS/WSS port 443 is open on the server.'
+            const isBlocked =
+              err.message === 'xhr poll error' ||
+              err.message === 'timeout' ||
+              err.message?.toLowerCase().includes('timeout') ||
+              err.message?.toLowerCase().includes('network');
+
+            const msg = isBlocked
+              ? 'Video call connection timed out. Please ensure Inbound Port 443 (HTTPS) is opened in your AWS EC2 Security Group (launch-wizard-1).'
               : (err.message || 'Could not connect to the call server');
             setErrorMsg(msg);
             setPhase('error');
