@@ -5,7 +5,9 @@ class CustomerDashboardController {
   async getDashboard(req, res) {
     try {
       const userId = req.user.id || req.user._id;
-      const dashboardData = await CustomerDashboardService.getDashboardData(userId);
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 5));
+      const dashboardData = await CustomerDashboardService.getDashboardData(userId, { page, limit });
       return successResponse(res, { data: dashboardData, message: "Dashboard data fetched successfully" });
     } catch (error) {
       console.error("Dashboard Controller Error:", error);
@@ -46,9 +48,18 @@ class CustomerDashboardController {
   async getRecentTransactions(req, res) {
     try {
       const userId = req.user.id || req.user._id;
-      const limit = parseInt(req.query.limit, 10) || 10;
-      const transactions = await CustomerDashboardService.getRecentTransactions(userId, limit);
-      return successResponse(res, { data: transactions });
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 5));
+      const { transactions, pagination } = await CustomerDashboardService.getRecentTransactions(userId, { page, limit });
+      return successResponse(res, {
+        data: {
+          transactions,
+          pagination,
+        },
+        transactions,
+        pagination,
+        message: "Recent transactions fetched successfully",
+      });
     } catch (error) {
       return errorResponse(res, error.message, error.statusCode || 500);
     }

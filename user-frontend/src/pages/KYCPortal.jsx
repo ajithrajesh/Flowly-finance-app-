@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { kycAPI, getErrorMessage } from '../services/api';
+import { kycAPI, getErrorMessage, resolveDocUrl } from '../services/api';
 import VideoKycCall from './VideoKycCall';
 import { 
   FileCheck, 
@@ -312,7 +312,7 @@ const KYCPortal = () => {
             
             {(kycDetails.aadhaarUrl || kycDetails.documentUrl) && (
               <a
-                href={kycDetails.aadhaarUrl || kycDetails.documentUrl}
+                href={resolveDocUrl(kycDetails.aadhaarUrl || kycDetails.documentUrl)}
                 target="_blank"
                 rel="noreferrer"
                 style={{
@@ -334,7 +334,7 @@ const KYCPortal = () => {
 
             {kycDetails.panUrl && (
               <a
-                href={kycDetails.panUrl}
+                href={resolveDocUrl(kycDetails.panUrl)}
                 target="_blank"
                 rel="noreferrer"
                 style={{
@@ -356,7 +356,7 @@ const KYCPortal = () => {
 
             {kycDetails.selfieUrl && (
               <a
-                href={kycDetails.selfieUrl}
+                href={resolveDocUrl(kycDetails.selfieUrl)}
                 target="_blank"
                 rel="noreferrer"
                 style={{
@@ -387,7 +387,9 @@ const KYCPortal = () => {
               <Video size={30} color="#5C187B" />
               <div>
                 <div style={{ fontSize: '12px', color: '#6E677B', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>
-                  {VIDEO_KYC_LABEL[videoKyc.status] || 'Video KYC'}
+                  {videoKyc.status === 'completed'
+                    ? (kycDetails?.videoKycVerified ? 'Video KYC Verified' : 'Video Call Concluded')
+                    : (VIDEO_KYC_LABEL[videoKyc.status] || 'Video KYC')}
                 </div>
                 <div style={{ fontSize: '16px', fontWeight: 700, color: '#201530' }}>
                   {videoKyc.scheduledAt
@@ -403,8 +405,16 @@ const KYCPortal = () => {
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span className={`badge ${VIDEO_KYC_BADGE[videoKyc.status] || 'badge-amber'}`}>
-                {VIDEO_KYC_LABEL[videoKyc.status] || videoKyc.status}
+              <span
+                className={`badge ${
+                  videoKyc.status === 'completed'
+                    ? (kycDetails?.videoKycVerified ? 'badge-green' : 'badge-amber')
+                    : (VIDEO_KYC_BADGE[videoKyc.status] || 'badge-amber')
+                }`}
+              >
+                {videoKyc.status === 'completed'
+                  ? (kycDetails?.videoKycVerified ? 'Verified ✓' : 'Verification Under Review')
+                  : (VIDEO_KYC_LABEL[videoKyc.status] || videoKyc.status)}
               </span>
               {['scheduled', 'in_progress'].includes(videoKyc.status) && (
                 <button className="btn-primary" onClick={() => setActiveCallSessionId(videoKyc._id || videoKyc.id)}>
@@ -416,6 +426,16 @@ const KYCPortal = () => {
           {videoKyc.status === 'scheduled' && (
             <p style={{ marginTop: '12px', marginBottom: 0, fontSize: '13px', color: '#6E677B' }}>
               A verification officer will video call you at the scheduled time to confirm your identity. You can join up to 10 minutes early.
+            </p>
+          )}
+          {videoKyc.status === 'completed' && !kycDetails?.videoKycVerified && (
+            <p style={{ marginTop: '12px', marginBottom: 0, fontSize: '13px', color: '#92400E' }}>
+              Your video call has completed. A verification officer is finalizing the checklist and recording verification before approval.
+            </p>
+          )}
+          {videoKyc.status === 'completed' && kycDetails?.videoKycVerified && (
+            <p style={{ marginTop: '12px', marginBottom: 0, fontSize: '13px', color: '#2E7A22' }}>
+              ✓ All video KYC checks have successfully passed.
             </p>
           )}
         </div>

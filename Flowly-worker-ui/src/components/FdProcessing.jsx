@@ -1,13 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import * as api from '../api';
+import Pagination from './Pagination';
 
 export default function FdProcessing({ onToast }) {
   const [queue, setQueue] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('pending');
+  const [searchTerm, setSearchTerm] = useState('');
   const [pagination, setPagination] = useState(null);
   const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
 
   // Review Modal State
   const [selectedFdId, setSelectedFdId] = useState(null);
@@ -22,11 +25,11 @@ export default function FdProcessing({ onToast }) {
   const [infoMessage, setInfoMessage] = useState('');
   const [submittingAction, setSubmittingAction] = useState(false);
 
-  const loadQueue = async (p = 1, stat = 'pending') => {
+  const loadQueue = useCallback(async (p = 1, stat = 'pending', l = 10, search = '') => {
     setLoading(true);
     setError('');
     try {
-      const res = await api.fetchFdQueue({ page: p, limit: 15, status: stat });
+      const res = await api.fetchFdQueue({ page: p, limit: l, status: stat, search });
       if (res && Array.isArray(res.fixedDeposits)) {
         setQueue(res.fixedDeposits);
         setPagination(res.pagination || null);
@@ -40,11 +43,11 @@ export default function FdProcessing({ onToast }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    loadQueue(page, statusFilter);
-  }, [page, statusFilter]);
+    loadQueue(page, statusFilter, limit, searchTerm);
+  }, [loadQueue, page, statusFilter, limit, searchTerm]);
 
   const handleOpenReview = async (id) => {
     setSelectedFdId(id);
@@ -143,8 +146,8 @@ export default function FdProcessing({ onToast }) {
         </button>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="card" style={{ padding: '12px 16px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+      {/* Filter Tabs & Search Bar */}
+      <div className="card" style={{ padding: '12px 16px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
         <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '2px' }}>
           {[
             { id: 'pending', label: 'Pending Review' },
@@ -174,11 +177,30 @@ export default function FdProcessing({ onToast }) {
             </button>
           ))}
         </div>
-        {pagination && (
-          <div style={{ fontSize: '12px', color: '#6B7280' }}>
-            Total Count: <strong>{pagination.total}</strong>
-          </div>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <input
+            type="text"
+            placeholder="Search by customer, FD #..."
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setPage(1);
+            }}
+            style={{
+              height: '30px',
+              padding: '0 10px',
+              fontSize: '12px',
+              borderRadius: '6px',
+              border: '1px solid #D1D5DB',
+              minWidth: '220px',
+            }}
+          />
+          {pagination && (
+            <div style={{ fontSize: '12px', color: '#6B7280', whiteSpace: 'nowrap' }}>
+              Total Count: <strong>{pagination.total}</strong>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Queue Table */}
@@ -243,6 +265,19 @@ export default function FdProcessing({ onToast }) {
             </tbody>
           </table>
         </div>
+      )}
+
+      {/* Pagination Controls */}
+      {pagination && (
+        <Pagination
+          pagination={pagination}
+          page={page}
+          limit={limit}
+          onPageChange={setPage}
+          onLimitChange={setLimit}
+          limitOptions={[5, 10, 15, 25, 50]}
+          itemLabel="FD applications"
+        />
       )}
 
       {/* REVIEW & DECISION MODAL */}

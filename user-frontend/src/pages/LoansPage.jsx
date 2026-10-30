@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { loansAPI, getErrorMessage } from '../services/api';
+import { loansAPI, getErrorMessage, resolveDocUrl } from '../services/api';
 import {
   CreditCard,
   CheckCircle2,
@@ -18,8 +18,53 @@ import {
   FileCheck,
   ShieldCheck,
   Upload,
-  Check
+  Check,
+  Eye,
+  Trash2,
+  RefreshCw,
+  Download,
+  ExternalLink,
+  Paperclip,
+  Plus,
 } from 'lucide-react';
+
+const PRESET_DOCUMENTS = {
+  Personal: [
+    { name: 'Salary Slips (Last 3 Months)', description: 'Latest 3 months salary slips from employer', isMandatory: true },
+    { name: 'Bank Statement (Last 6 Months)', description: 'Salary credit bank statement', isMandatory: true },
+    { name: 'Current Address Proof', description: 'Electricity bill, rental agreement, or broadband bill', isMandatory: false },
+  ],
+  Business: [
+    { name: 'Business Registration / GST Certificate', description: 'Proof of business existence and active operations (min 1 year)', isMandatory: true },
+    { name: 'Last 2 Years ITR & Balance Sheet', description: 'Audited financial statements and tax return receipts', isMandatory: true },
+    { name: 'Last 12 Months Current Bank Account Statement', description: 'Primary business operating account statement', isMandatory: true },
+    { name: 'PAN & Aadhaar of Proprietor / Partners', description: 'KYC identity proof of business owners/signatories', isMandatory: true },
+    { name: 'Office / Shop Rent Agreement or Ownership Deed', description: 'Proof of commercial operating premises address', isMandatory: false },
+  ],
+  Education: [
+    { name: 'University Admission Offer Letter', description: 'Official acceptance letter from university/college', isMandatory: true },
+    { name: 'Course Fee Structure Document', description: 'Breakdown of semester tuition, hostel, and exam fees on college letterhead', isMandatory: true },
+    { name: 'Academic Marksheets & Certificates', description: '10th, 12th, and graduation degree transcripts', isMandatory: true },
+    { name: 'Co-borrower / Parent Income Proof', description: 'Parent or guardian salary slips / ITR and bank statement', isMandatory: true },
+  ],
+  Vehicle: [
+    { name: 'Vehicle Proforma Invoice / Quotation', description: 'Official dealer on-road price quotation', isMandatory: true },
+    { name: 'Valid Driving License', description: 'Applicant valid driving license copy', isMandatory: true },
+    { name: 'Income Proof (Salary Slips / ITR)', description: 'Recent 3 months salary slips or last year ITR', isMandatory: true },
+    { name: 'Bank Statement (Last 6 Months)', description: 'Primary savings bank account statement', isMandatory: true },
+  ],
+  Emergency: [
+    { name: 'Hospital Estimate / Medical Prescription', description: 'Doctor prescription, hospital estimate, or treatment bill', isMandatory: true },
+    { name: 'Bank Statement (Last 3 Months)', description: 'Recent bank statement of applicant', isMandatory: true },
+  ],
+};
+
+const formatFileSize = (bytes) => {
+  if (!bytes) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+};
 
 const LoansPage = () => {
   const { user } = useAuth();
@@ -90,7 +135,15 @@ const LoansPage = () => {
   const [actionModalType, setActionModalType] = useState(null); // 'doc_reupload' | 'sanction_letter' | 'esign' | null
   const [reuploadDocTitle, setReuploadDocTitle] = useState('');
   const [reuploadDocFileName, setReuploadDocFileName] = useState('');
+  const [reuploadDocFile, setReuploadDocFile] = useState(null);
   const [esignOtp, setEsignOtp] = useState('');
+
+  // Documents Management Modal for My Applications (View & Edit Documents)
+  const [docsModalApp, setDocsModalApp] = useState(null);
+  const [docUpdatingKey, setDocUpdatingKey] = useState(null);
+
+  // Universal Document Preview Modal (for client-side Blob or server-side URL)
+  const [docPreviewModal, setDocPreviewModal] = useState(null); // { title, url, isBlob, mimeType }
 
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -245,11 +298,19 @@ const LoansPage = () => {
     setError('');
     setMessage('');
     setStepError('');
-    setSelectedProduct(product);
+    const freshProd = products.find((p) => p._id === product?._id || p.loanType === product?.loanType) || product;
+    const prodWithDocs = {
+      ...freshProd,
+      requiredDocuments:
+        Array.isArray(freshProd?.requiredDocuments) && freshProd.requiredDocuments.length > 0
+          ? freshProd.requiredDocuments
+          : PRESET_DOCUMENTS[freshProd?.loanType] || [],
+    };
+    setSelectedProduct(prodWithDocs);
     setWizardData({
-      amount: product?.minAmount || 50000,
-      tenureMonths: product?.tenure || 12,
-      interestType: product?.interestType || 'diminishing',
+      amount: prodWithDocs?.minAmount || 50000,
+      tenureMonths: prodWithDocs?.tenure || 12,
+      interestType: prodWithDocs?.interestType || 'diminishing',
       purpose: 'Personal Expenses',
       fullName: user?.name || '',
       dob: '',
@@ -289,9 +350,95 @@ const LoansPage = () => {
         name: docName,
         file: fileObj,
         fileName: fileObj.name,
+        size: fileObj.size,
       },
     }));
     setStepError('');
+  };
+
+  const handleRemoveSpecificDoc = (docName) => {
+    setUploadedSpecificDocs((prev) => {
+      const copy = { ...prev };
+      delete copy[docName];
+      return copy;
+    });
+  };
+
+  const handleFileUpload = (fieldKey, fileNameKey, fileObj) => {
+    if (!fileObj) return;
+    setWizardData((prev) => ({
+      ...prev,
+      [fieldKey]: fileObj,
+      [fileNameKey]: fileObj.name,
+    }));
+    setStepError('');
+  };
+
+  const handleRemoveFile = (fieldKey, fileNameKey) => {
+    setWizardData((prev) => ({
+      ...prev,
+      [fieldKey]: null,
+      [fileNameKey]: '',
+    }));
+  };
+
+  const handlePreviewFile = (fileObj, title) => {
+    if (!fileObj) return;
+    const blobUrl = URL.createObjectURL(fileObj);
+    setDocPreviewModal({
+      title: title || fileObj.name,
+      url: blobUrl,
+      isBlob: true,
+      mimeType: fileObj.type || '',
+    });
+  };
+
+  const handlePreviewUrl = (url, title) => {
+    if (!url) return;
+    setDocPreviewModal({
+      title: title || 'Document Preview',
+      url: resolveDocUrl(url),
+      isBlob: false,
+    });
+  };
+
+  const closeDocPreview = () => {
+    if (docPreviewModal?.isBlob && docPreviewModal?.url) {
+      try {
+        URL.revokeObjectURL(docPreviewModal.url);
+      } catch (e) {}
+    }
+    setDocPreviewModal(null);
+  };
+
+  const handleUpdateAppDoc = async (appId, fileObj, docType, docName, schemeIndex) => {
+    if (!fileObj || !appId) return;
+    setDocUpdatingKey(`${docType}_${docName || schemeIndex}`);
+    setError('');
+    setMessage('');
+    try {
+      const formData = new FormData();
+      formData.append('file', fileObj);
+      if (docName) formData.append('targetDocName', docName);
+      if (schemeIndex !== undefined) formData.append('targetDocIndex', schemeIndex);
+      if (docType === 'pan') formData.append('panCard', fileObj);
+      if (docType === 'aadhaar') formData.append('aadhaarCard', fileObj);
+      if (docType === 'salary') formData.append('salarySlip', fileObj);
+      if (docType === 'bank') formData.append('bankStatement', fileObj);
+      if (docType === 'additional') formData.append('additionalDoc', fileObj);
+
+      const res = await loansAPI.updateDocuments(appId, formData);
+      const updatedApp = res.data?.application;
+      if (updatedApp) {
+        setDocsModalApp(updatedApp);
+        setApplications((prev) => prev.map((a) => (a._id === appId ? updatedApp : a)));
+      }
+      setMessage(`Document "${docName || fileObj.name}" updated successfully! Review officer notified.`);
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to update document. Please try again.'));
+    } finally {
+      setDocUpdatingKey(null);
+    }
   };
 
   const validateCurrentStep = () => {
@@ -331,30 +478,27 @@ const LoansPage = () => {
     }
 
     if (wizardStep === 5) {
-      if (selectedProduct?.requiredDocuments && selectedProduct.requiredDocuments.length > 0) {
-        for (const reqDoc of selectedProduct.requiredDocuments) {
-          if (reqDoc.isMandatory && !uploadedSpecificDocs[reqDoc.name]?.fileName) {
-            setStepError(`Please upload mandatory document: "${reqDoc.name}"`);
-            return false;
-          }
-        }
-      } else {
-        if (!wizardData.panCardFileName) {
-          setStepError('Please upload your PAN Card document.');
+      const activeReqDocs = (
+        Array.isArray(selectedProduct?.requiredDocuments) && selectedProduct.requiredDocuments.length > 0
+          ? selectedProduct.requiredDocuments.filter((doc) => !doc.disabled && doc.isActive !== false)
+          : PRESET_DOCUMENTS[selectedProduct?.loanType] || []
+      );
+
+      for (const reqDoc of activeReqDocs) {
+        if (reqDoc.isMandatory && !uploadedSpecificDocs[reqDoc.name]?.file && !uploadedSpecificDocs[reqDoc.name]?.fileName) {
+          setStepError(`Please upload mandatory document: "${reqDoc.name}"`);
           return false;
         }
-        if (!wizardData.aadhaarCardFileName) {
-          setStepError('Please upload your Aadhaar Card document.');
-          return false;
-        }
-        if (!wizardData.salarySlipFileName) {
-          setStepError('Please upload your Salary Slip / Income Proof document.');
-          return false;
-        }
-        if (!wizardData.bankStatementFileName) {
-          setStepError('Please upload your Bank Statement (Latest 6 Months).');
-          return false;
-        }
+      }
+
+      const isKycVerified = user?.kycStatus === 'verified';
+      if (!isKycVerified && !wizardData.panCardFileName && !wizardData.panCardFile) {
+        setStepError('Please upload your PAN Card document.');
+        return false;
+      }
+      if (!isKycVerified && !wizardData.aadhaarCardFileName && !wizardData.aadhaarCardFile) {
+        setStepError('Please upload your Aadhaar Card document.');
+        return false;
       }
     }
 
@@ -384,81 +528,149 @@ const LoansPage = () => {
     setWizardStep((prev) => (prev === 5 ? 3 : Math.max(prev - 1, 1)));
   };
 
-  const handleFileUpload = (fieldKey, fileNameKey, fileObj) => {
-    if (!fileObj) return;
-    setWizardData((prev) => ({
-      ...prev,
-      [fieldKey]: fileObj,
-      [fileNameKey]: fileObj.name,
-    }));
-    setStepError('');
-  };
-
   const handleFinalSubmitApplication = async () => {
     setSubmitting(true);
     setError('');
     setMessage('');
     try {
+      // Filter out any disabled or inactive scheme requirements
+      const activeReqDocs = (
+        Array.isArray(selectedProduct?.requiredDocuments) && selectedProduct.requiredDocuments.length > 0
+          ? selectedProduct.requiredDocuments.filter((doc) => !doc.disabled && doc.isActive !== false)
+          : PRESET_DOCUMENTS[selectedProduct?.loanType] || []
+      );
+
       // Collect specific docs configured for this loan product
-      const specificDocsList = [];
-      if (selectedProduct?.requiredDocuments && selectedProduct.requiredDocuments.length > 0) {
-        selectedProduct.requiredDocuments.forEach((doc) => {
-          const uploaded = uploadedSpecificDocs[doc.name];
-          if (uploaded?.fileName) {
-            specificDocsList.push({
-              name: doc.name,
-              fileName: uploaded.fileName,
-              docUrl: `/uploads/${uploaded.fileName}`,
-              status: 'verified',
-              uploadedAt: new Date(),
-            });
-          }
-        });
+      const specificDocsList = activeReqDocs.map((doc, idx) => {
+        const uploaded = uploadedSpecificDocs[doc.name];
+        return {
+          schemeIndex: idx,
+          name: doc.name,
+          description: doc.description || '',
+          isMandatory: Boolean(doc.isMandatory),
+          fileName: uploaded?.fileName || '',
+          docUrl: uploaded?.file ? '' : (uploaded?.docUrl || ''),
+          status: uploaded?.fileName ? 'uploaded' : 'pending',
+          uploadedAt: uploaded?.fileName ? new Date() : null,
+        };
+      });
+
+      // Check if any real file objects were selected by the applicant
+      const hasFiles = Boolean(
+        wizardData.panCardFile ||
+        wizardData.aadhaarCardFile ||
+        wizardData.salarySlipFile ||
+        wizardData.bankStatementFile ||
+        wizardData.additionalDocFile ||
+        Object.values(uploadedSpecificDocs).some((d) => d?.file)
+      );
+
+      let res;
+      if (hasFiles) {
+        const formData = new FormData();
+        if (selectedProduct?._id) formData.append('productId', selectedProduct._id);
+        formData.append('productName', selectedProduct?.productName || 'Personal Loan');
+        formData.append('loanType', selectedProduct?.loanType || 'Personal');
+        formData.append('requestedAmount', wizardData.amount);
+        formData.append('tenureMonths', wizardData.tenureMonths);
+        formData.append('interestType', wizardData.interestType || 'diminishing');
+        formData.append('purpose', wizardData.purpose || 'Personal Expenses');
+
+        formData.append(
+          'personalInformation',
+          JSON.stringify({
+            fullName: wizardData.fullName,
+            dob: wizardData.dob,
+            email: wizardData.email,
+            phone: wizardData.phone,
+            address: wizardData.address,
+            panNumber: wizardData.panNumber,
+            aadhaarNumber: wizardData.aadhaarNumber,
+          })
+        );
+
+        formData.append(
+          'employmentDetails',
+          JSON.stringify({
+            employmentType: wizardData.employmentType,
+            companyName: wizardData.companyName,
+            designation: wizardData.designation,
+            workExperienceYears: Number(wizardData.workExperienceYears || 0),
+          })
+        );
+
+        formData.append(
+          'incomeDetails',
+          JSON.stringify({
+            monthlyIncome: Number(wizardData.monthlyIncome || 0),
+            existingMonthlyEmi: Number(wizardData.existingMonthlyEmi || 0),
+          })
+        );
+
+        if (wizardData.panCardFile) formData.append('panCard', wizardData.panCardFile);
+        if (wizardData.aadhaarCardFile) formData.append('aadhaarCard', wizardData.aadhaarCardFile);
+        if (wizardData.salarySlipFile) formData.append('salarySlip', wizardData.salarySlipFile);
+        if (wizardData.bankStatementFile) formData.append('bankStatement', wizardData.bankStatementFile);
+        if (wizardData.additionalDocFile) formData.append('additionalDoc', wizardData.additionalDocFile);
+
+        if (activeReqDocs.length > 0) {
+          activeReqDocs.forEach((doc, idx) => {
+            const uploaded = uploadedSpecificDocs[doc.name];
+            if (uploaded?.file) {
+              formData.append(`specificDoc_${idx}`, uploaded.file);
+              formData.append(`specificDocName_${idx}`, doc.name);
+            }
+          });
+        }
+
+        formData.append(
+          'documents',
+          JSON.stringify({
+            specificDocs: specificDocsList,
+          })
+        );
+
+        res = await loansAPI.applyLoan(formData);
+      } else {
+        const payload = {
+          productId: selectedProduct?._id,
+          productName: selectedProduct?.productName || 'Personal Loan',
+          loanType: selectedProduct?.loanType || 'Personal',
+          requestedAmount: wizardData.amount,
+          tenureMonths: wizardData.tenureMonths,
+          interestType: wizardData.interestType || 'diminishing',
+          purpose: wizardData.purpose,
+          personalInformation: {
+            fullName: wizardData.fullName,
+            dob: wizardData.dob,
+            email: wizardData.email,
+            phone: wizardData.phone,
+            address: wizardData.address,
+            panNumber: wizardData.panNumber,
+            aadhaarNumber: wizardData.aadhaarNumber,
+          },
+          employmentDetails: {
+            employmentType: wizardData.employmentType,
+            companyName: wizardData.companyName,
+            designation: wizardData.designation,
+            workExperienceYears: Number(wizardData.workExperienceYears),
+          },
+          incomeDetails: {
+            monthlyIncome: Number(wizardData.monthlyIncome),
+            existingMonthlyEmi: Number(wizardData.existingMonthlyEmi),
+          },
+          documents: {
+            specificDocs: specificDocsList,
+            panCardFileName: wizardData.panCardFileName || '',
+            aadhaarCardFileName: wizardData.aadhaarCardFileName || '',
+            salarySlipFileName: wizardData.salarySlipFileName || '',
+            bankStatementFileName: wizardData.bankStatementFileName || '',
+            additionalDocFileName: wizardData.additionalDocFileName || '',
+          },
+        };
+
+        res = await loansAPI.applyLoan(payload);
       }
-
-      // Map any fallback standard docs
-      const panFile = uploadedSpecificDocs['PAN Card']?.fileName || wizardData.panCardFileName || 'pan_card.pdf';
-      const aadhaarFile = uploadedSpecificDocs['Aadhaar Card']?.fileName || wizardData.aadhaarCardFileName || 'aadhaar_card.pdf';
-      const salaryFile = uploadedSpecificDocs['Last 3 Months Salary Slips']?.fileName || wizardData.salarySlipFileName || 'salary_slip.pdf';
-      const bankFile = uploadedSpecificDocs['Last 6 Months Bank Statement']?.fileName || wizardData.bankStatementFileName || 'bank_statement.pdf';
-
-      const payload = {
-        productId: selectedProduct?._id,
-        productName: selectedProduct?.productName || 'Personal Loan',
-        loanType: selectedProduct?.loanType || 'Personal',
-        requestedAmount: wizardData.amount,
-        tenureMonths: wizardData.tenureMonths,
-        interestType: wizardData.interestType || 'diminishing',
-        purpose: wizardData.purpose,
-        personalInformation: {
-          fullName: wizardData.fullName,
-          dob: wizardData.dob,
-          email: wizardData.email,
-          phone: wizardData.phone,
-          address: wizardData.address,
-          panNumber: wizardData.panNumber,
-          aadhaarNumber: wizardData.aadhaarNumber,
-        },
-        employmentDetails: {
-          employmentType: wizardData.employmentType,
-          companyName: wizardData.companyName,
-          designation: wizardData.designation,
-          workExperienceYears: Number(wizardData.workExperienceYears),
-        },
-        incomeDetails: {
-          monthlyIncome: Number(wizardData.monthlyIncome),
-          existingMonthlyEmi: Number(wizardData.existingMonthlyEmi),
-        },
-        documents: {
-          panCardUrl: `/uploads/${panFile}`,
-          aadhaarCardUrl: `/uploads/${aadhaarFile}`,
-          salarySlipUrl: `/uploads/${salaryFile}`,
-          bankStatementUrl: `/uploads/${bankFile}`,
-          specificDocs: specificDocsList,
-        },
-      };
-
-      const res = await loansAPI.applyLoan(payload);
       if (res.data && res.data.application) {
         setCreatedAppNumber(res.data.application.applicationNumber || 'LN-2026-OK');
         setWizardStep(8);
@@ -479,18 +691,20 @@ const LoansPage = () => {
   // Customer Actions Handlers
   const handleResubmitDocSubmit = async (e) => {
     e.preventDefault();
-    if (!selectedAppForAction || !reuploadDocFileName) {
-      setError('Please select a file to upload');
+    if (!selectedAppForAction || !reuploadDocFile) {
+      setError('Please select a valid document file to upload');
       return;
     }
     setSubmitting(true);
     try {
-      const res = await loansAPI.resubmitDocuments(selectedAppForAction._id, {
-        docTitle: reuploadDocTitle || 'Requested Verification Document',
-        docUrl: `/uploads/${reuploadDocFileName}`,
-      });
+      const formData = new FormData();
+      formData.append('docTitle', reuploadDocTitle || 'Requested Verification Document');
+      formData.append('document', reuploadDocFile);
+      const res = await loansAPI.resubmitDocuments(selectedAppForAction._id, formData);
       setMessage(res.data?.message || 'Document uploaded successfully! Re-review in progress.');
       setActionModalType(null);
+      setReuploadDocFile(null);
+      setReuploadDocFileName('');
       fetchLoanData();
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to upload document'));
@@ -713,12 +927,12 @@ const LoansPage = () => {
                       <span className="v">{prod.maxTenure || prod.tenure} Months</span>
                     </div>
 
-                    {prod.requiredDocuments && prod.requiredDocuments.length > 0 && (
+                    {prod.requiredDocuments && prod.requiredDocuments.filter((d) => !d.disabled && d.isActive !== false).length > 0 && (
                       <div style={{ marginTop: '12px', padding: '8px 10px', backgroundColor: '#F9FAFB', borderRadius: '8px', fontSize: '11.5px', border: '1px solid #F1F5F9' }}>
                         <span style={{ fontWeight: 600, color: '#374151' }}>Required Documents: </span>
                         <span style={{ color: '#6B7280' }}>
-                          {prod.requiredDocuments.map((d) => d.name).slice(0, 2).join(', ')}
-                          {prod.requiredDocuments.length > 2 ? ` +${prod.requiredDocuments.length - 2} more` : ''}
+                          {prod.requiredDocuments.filter((d) => !d.disabled && d.isActive !== false).map((d) => d.name).slice(0, 2).join(', ')}
+                          {prod.requiredDocuments.filter((d) => !d.disabled && d.isActive !== false).length > 2 ? ` +${prod.requiredDocuments.filter((d) => !d.disabled && d.isActive !== false).length - 2} more` : ''}
                         </span>
                       </div>
                     )}
@@ -1095,6 +1309,33 @@ const LoansPage = () => {
                       </div>
                     </div>
                   )}
+
+                  {/* DOCUMENT MANAGEMENT & ACTION TOOLBAR */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '12px', borderTop: '1px solid #EEE7F4', marginTop: '12px', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ fontSize: '12px', color: '#6E677B', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <FileCheck size={14} color="#5C187B" />
+                      <span>
+                        {(app.documents?.specificDocs?.filter((d) => d.docUrl || d.fileName)?.length || 0) +
+                          (app.documents?.panCardUrl ? 1 : 0) +
+                          (app.documents?.aadhaarCardUrl ? 1 : 0) +
+                          (app.documents?.salarySlipUrl ? 1 : 0) +
+                          (app.documents?.bankStatementUrl ? 1 : 0) +
+                          (app.documents?.additionalDocs?.filter((d) => d.docUrl || d.fileName)?.length || 0)}{' '}
+                        Document(s) Attached
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => setDocsModalApp(app)}
+                      className="btn-secondary"
+                      style={{ padding: '6px 14px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                    >
+                      <FileText size={14} />
+                      {['submitted', 'under_worker_review', 'documents_requested'].includes(app.status)
+                        ? 'View & Edit Documents ✏️'
+                        : 'View Attached Documents 👁️'}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1308,153 +1549,551 @@ const LoansPage = () => {
               </div>
             )}
 
-            {/* STEP 5: DOCUMENT UPLOAD (DYNAMIC BY LOAN TYPE OR STANDARD) */}
+            {/* STEP 5: COMPREHENSIVE DOCUMENT UPLOAD (SCHEME-SPECIFIC & STANDARD PROOFS) */}
             {wizardStep === 5 && (
               <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
                   <div>
-                    <h4 style={{ fontSize: '15px', color: '#5C187B', margin: 0, fontWeight: 700 }}>
-                      Required Documents for {selectedProduct.productName}
+                    <h4 style={{ fontSize: '16px', color: '#5C187B', margin: 0, fontWeight: 700 }}>
+                      Step 4: Upload Verification Documents
                     </h4>
                     <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#6E677B' }}>
-                      Please upload the required verification files for this {selectedProduct.loanType} loan.
+                      Please provide the required scheme documents and financial verification proofs for this loan.
                     </p>
                   </div>
-                  <span className="badge badge-purple" style={{ fontSize: '11px' }}>
+                  <span className="badge badge-purple" style={{ fontSize: '11px', padding: '4px 10px', fontWeight: 700 }}>
                     {selectedProduct.loanType} Scheme
                   </span>
                 </div>
 
-                {selectedProduct.requiredDocuments && selectedProduct.requiredDocuments.length > 0 ? (
-                  <div style={{ display: 'grid', gap: '12px' }}>
-                    {selectedProduct.requiredDocuments.map((doc, idx) => {
-                      const uploaded = uploadedSpecificDocs[doc.name];
-                      return (
-                        <div
-                          key={idx}
-                          style={{
-                            padding: '14px 18px',
-                            background: uploaded ? '#F0FDF4' : '#F8FAFC',
-                            borderRadius: '10px',
-                            border: uploaded ? '1px solid #86EFAC' : '1px solid #E2E8F0',
-                          }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                            <span style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
-                              {idx + 1}. {doc.name} {doc.isMandatory ? <span style={{ color: '#DC2626' }}>*</span> : <span style={{ fontSize: '11px', color: '#6E677B', fontWeight: 400 }}>(Optional)</span>}
-                            </span>
-                            {uploaded ? (
-                              <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ {uploaded.fileName}</span>
-                            ) : doc.isMandatory ? (
-                              <span style={{ fontSize: '11px', color: '#DC2626', fontWeight: 600 }}>Mandatory</span>
+                {/* 1. SCHEME-SPECIFIC REQUIRED DOCUMENTS (CONFIGURED BY BANK WORKERS) */}
+                {(() => {
+                  const activeReqDocs = (
+                    Array.isArray(selectedProduct?.requiredDocuments) && selectedProduct.requiredDocuments.length > 0
+                      ? selectedProduct.requiredDocuments.filter((d) => !d.disabled && d.isActive !== false)
+                      : PRESET_DOCUMENTS[selectedProduct?.loanType] || []
+                  );
+
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                      {/* Section 1: Scheme Specific */}
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 700, color: '#201530', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <FileText size={16} color="#5C187B" />
+                            1. Scheme-Specific Requirements ({selectedProduct.loanType} Loan)
+                          </span>
+                          <span style={{ fontSize: '11px', color: '#6E677B' }}>
+                            Configured for this scheme
+                          </span>
+                        </div>
+
+                        {activeReqDocs.length === 0 ? (
+                          <div style={{ padding: '12px', background: '#F8FAFC', borderRadius: '8px', border: '1px solid #E2E8F0', fontSize: '12px', color: '#6E677B' }}>
+                            No additional scheme-specific documents required for this loan scheme.
+                          </div>
+                        ) : (
+                          <div style={{ display: 'grid', gap: '10px' }}>
+                            {activeReqDocs.map((doc, idx) => {
+                              const uploaded = uploadedSpecificDocs[doc.name];
+                              const hasFile = Boolean(uploaded?.file || uploaded?.fileName);
+
+                              return (
+                                <div
+                                  key={doc._id || idx}
+                                  style={{
+                                    padding: '12px 16px',
+                                    background: hasFile ? '#F0FDF4' : '#FFF',
+                                    borderRadius: '10px',
+                                    border: hasFile ? '1.5px solid #86EFAC' : '1px solid #E2E8F0',
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
+                                    <div style={{ flex: 1, marginRight: '10px' }}>
+                                      <div style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
+                                        {idx + 1}. {doc.name}{' '}
+                                        {doc.isMandatory ? (
+                                          <span style={{ color: '#DC2626', fontWeight: 800 }}>*</span>
+                                        ) : (
+                                          <span style={{ fontSize: '11px', color: '#6E677B', fontWeight: 400 }}>(Optional)</span>
+                                        )}
+                                      </div>
+                                      {doc.description && (
+                                        <p style={{ margin: '2px 0 0 0', fontSize: '11.5px', color: '#6E677B' }}>
+                                          {doc.description}
+                                        </p>
+                                      )}
+                                    </div>
+                                    <div>
+                                      {hasFile ? (
+                                        <span className="badge badge-green" style={{ fontSize: '11px' }}>
+                                          ✓ Ready
+                                        </span>
+                                      ) : doc.isMandatory ? (
+                                        <span className="badge badge-red" style={{ fontSize: '10px' }}>
+                                          Mandatory
+                                        </span>
+                                      ) : (
+                                        <span className="badge badge-gray" style={{ fontSize: '10px' }}>
+                                          Optional
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {hasFile ? (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #DCFCE7' }}>
+                                      <div style={{ fontSize: '12px', color: '#166534', display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        <Paperclip size={14} />
+                                        <span style={{ fontWeight: 600 }}>{uploaded.fileName}</span>
+                                        {uploaded.size && (
+                                          <span style={{ fontSize: '11px', color: '#15803D' }}>({formatFileSize(uploaded.size)})</span>
+                                        )}
+                                      </div>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        {uploaded.file && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handlePreviewFile(uploaded.file, doc.name)}
+                                            className="btn-secondary"
+                                            style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                            title="Preview Document"
+                                          >
+                                            <Eye size={12} /> Preview
+                                          </button>
+                                        )}
+                                        <label
+                                          className="btn-secondary"
+                                          style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer', margin: 0 }}
+                                          title="Replace with a different file"
+                                        >
+                                          <RefreshCw size={12} /> Replace
+                                          <input
+                                            type="file"
+                                            accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                            style={{ display: 'none' }}
+                                            onChange={(e) => {
+                                              if (e.target.files?.[0]) handleSpecificDocUpload(doc.name, e.target.files[0]);
+                                            }}
+                                          />
+                                        </label>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRemoveSpecificDoc(doc.name)}
+                                          className="btn-secondary"
+                                          style={{ padding: '4px 8px', fontSize: '11px', color: '#DC2626', border: '1px solid #FCA5A5' }}
+                                          title="Remove file"
+                                        >
+                                          <Trash2 size={12} />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div style={{ marginTop: '8px' }}>
+                                      <label
+                                        className="btn-secondary"
+                                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '6px 14px', fontSize: '12px', border: '1px dashed #A78BFA', backgroundColor: '#FAF5FF', color: '#5C187B' }}
+                                      >
+                                        <Upload size={13} /> Select {doc.name} (PDF or Image)
+                                        <input
+                                          type="file"
+                                          accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                          style={{ display: 'none' }}
+                                          onChange={(e) => {
+                                            if (e.target.files?.[0]) handleSpecificDocUpload(doc.name, e.target.files[0]);
+                                          }}
+                                        />
+                                      </label>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Section 2: Standard Identity & Income Documents */}
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 700, color: '#201530', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <ShieldCheck size={16} color="#5C187B" />
+                            2. Identity &amp; Financial Proofs
+                          </span>
+                          <span style={{ fontSize: '11px', color: '#059669', fontWeight: 600 }}>
+                            {user?.kycStatus === 'verified' ? '✓ Verified Customer Profile' : 'Verification Required'}
+                          </span>
+                        </div>
+
+                        <div style={{ display: 'grid', gap: '10px' }}>
+                          {/* PAN CARD */}
+                          <div style={{ padding: '12px 16px', background: wizardData.panCardFileName ? '#F0FDF4' : '#FFF', borderRadius: '10px', border: wizardData.panCardFileName ? '1.5px solid #86EFAC' : '1px solid #E2E8F0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                              <div>
+                                <span style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
+                                  PAN Card Document *
+                                </span>
+                                {user?.kycStatus === 'verified' && !wizardData.panCardFile && (
+                                  <span style={{ fontSize: '11px', color: '#059669', marginLeft: '8px', fontWeight: 500 }}>
+                                    ✓ Auto-Verified from KYC
+                                  </span>
+                                )}
+                              </div>
+                              {wizardData.panCardFileName || user?.kycStatus === 'verified' ? (
+                                <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ Ready</span>
+                              ) : (
+                                <span className="badge badge-red" style={{ fontSize: '10px' }}>Mandatory</span>
+                              )}
+                            </div>
+
+                            {wizardData.panCardFileName ? (
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #DCFCE7' }}>
+                                <div style={{ fontSize: '12px', color: '#166534', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <Paperclip size={14} />
+                                  <span style={{ fontWeight: 600 }}>{wizardData.panCardFileName}</span>
+                                  {wizardData.panCardFile?.size && (
+                                    <span style={{ fontSize: '11px', color: '#15803D' }}>({formatFileSize(wizardData.panCardFile.size)})</span>
+                                  )}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  {wizardData.panCardFile && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePreviewFile(wizardData.panCardFile, 'PAN Card')}
+                                      className="btn-secondary"
+                                      style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                    >
+                                      <Eye size={12} /> Preview
+                                    </button>
+                                  )}
+                                  <label className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer', margin: 0 }}>
+                                    <RefreshCw size={12} /> Replace
+                                    <input
+                                      type="file"
+                                      accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                      style={{ display: 'none' }}
+                                      onChange={(e) => {
+                                        if (e.target.files?.[0]) handleFileUpload('panCardFile', 'panCardFileName', e.target.files[0]);
+                                      }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveFile('panCardFile', 'panCardFileName')}
+                                    className="btn-secondary"
+                                    style={{ padding: '4px 8px', fontSize: '11px', color: '#DC2626', border: '1px solid #FCA5A5' }}
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
                             ) : (
-                              <span style={{ fontSize: '11px', color: '#6E677B' }}>Optional</span>
+                              <div style={{ marginTop: '6px' }}>
+                                <label className="btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '6px 14px', fontSize: '12px' }}>
+                                  <Upload size={13} /> {user?.kycStatus === 'verified' ? 'Upload Updated PAN (Optional)' : 'Select PAN Card File *'}
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                    style={{ display: 'none' }}
+                                    onChange={(e) => {
+                                      if (e.target.files?.[0]) handleFileUpload('panCardFile', 'panCardFileName', e.target.files[0]);
+                                    }}
+                                  />
+                                </label>
+                              </div>
                             )}
                           </div>
-                          {doc.description && (
-                            <p style={{ margin: '0 0 8px 0', fontSize: '11.5px', color: '#6E677B' }}>
-                              {doc.description}
-                            </p>
-                          )}
-                          <input
-                            type="file"
-                            accept=".pdf,.png,.jpg,.jpeg"
-                            className="form-input"
-                            style={{ padding: '6px' }}
-                            onChange={(e) => handleSpecificDocUpload(doc.name, e.target.files[0])}
-                          />
+
+                          {/* AADHAAR CARD */}
+                          <div style={{ padding: '12px 16px', background: wizardData.aadhaarCardFileName ? '#F0FDF4' : '#FFF', borderRadius: '10px', border: wizardData.aadhaarCardFileName ? '1.5px solid #86EFAC' : '1px solid #E2E8F0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                              <div>
+                                <span style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
+                                  Aadhaar Card Document *
+                                </span>
+                                {user?.kycStatus === 'verified' && !wizardData.aadhaarCardFile && (
+                                  <span style={{ fontSize: '11px', color: '#059669', marginLeft: '8px', fontWeight: 500 }}>
+                                    ✓ Auto-Verified from KYC
+                                  </span>
+                                )}
+                              </div>
+                              {wizardData.aadhaarCardFileName || user?.kycStatus === 'verified' ? (
+                                <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ Ready</span>
+                              ) : (
+                                <span className="badge badge-red" style={{ fontSize: '10px' }}>Mandatory</span>
+                              )}
+                            </div>
+
+                            {wizardData.aadhaarCardFileName ? (
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #DCFCE7' }}>
+                                <div style={{ fontSize: '12px', color: '#166534', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <Paperclip size={14} />
+                                  <span style={{ fontWeight: 600 }}>{wizardData.aadhaarCardFileName}</span>
+                                  {wizardData.aadhaarCardFile?.size && (
+                                    <span style={{ fontSize: '11px', color: '#15803D' }}>({formatFileSize(wizardData.aadhaarCardFile.size)})</span>
+                                  )}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  {wizardData.aadhaarCardFile && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePreviewFile(wizardData.aadhaarCardFile, 'Aadhaar Card')}
+                                      className="btn-secondary"
+                                      style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                    >
+                                      <Eye size={12} /> Preview
+                                    </button>
+                                  )}
+                                  <label className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer', margin: 0 }}>
+                                    <RefreshCw size={12} /> Replace
+                                    <input
+                                      type="file"
+                                      accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                      style={{ display: 'none' }}
+                                      onChange={(e) => {
+                                        if (e.target.files?.[0]) handleFileUpload('aadhaarCardFile', 'aadhaarCardFileName', e.target.files[0]);
+                                      }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveFile('aadhaarCardFile', 'aadhaarCardFileName')}
+                                    className="btn-secondary"
+                                    style={{ padding: '4px 8px', fontSize: '11px', color: '#DC2626', border: '1px solid #FCA5A5' }}
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div style={{ marginTop: '6px' }}>
+                                <label className="btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '6px 14px', fontSize: '12px' }}>
+                                  <Upload size={13} /> {user?.kycStatus === 'verified' ? 'Upload Updated Aadhaar (Optional)' : 'Select Aadhaar Card File *'}
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                    style={{ display: 'none' }}
+                                    onChange={(e) => {
+                                      if (e.target.files?.[0]) handleFileUpload('aadhaarCardFile', 'aadhaarCardFileName', e.target.files[0]);
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* SALARY SLIP */}
+                          <div style={{ padding: '12px 16px', background: wizardData.salarySlipFileName ? '#F0FDF4' : '#FFF', borderRadius: '10px', border: wizardData.salarySlipFileName ? '1.5px solid #86EFAC' : '1px solid #E2E8F0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                              <span style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
+                                Salary Slip / Income Proof (Recent)
+                              </span>
+                              {wizardData.salarySlipFileName && (
+                                <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ Ready</span>
+                              )}
+                            </div>
+
+                            {wizardData.salarySlipFileName ? (
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #DCFCE7' }}>
+                                <div style={{ fontSize: '12px', color: '#166534', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <Paperclip size={14} />
+                                  <span style={{ fontWeight: 600 }}>{wizardData.salarySlipFileName}</span>
+                                  {wizardData.salarySlipFile?.size && (
+                                    <span style={{ fontSize: '11px', color: '#15803D' }}>({formatFileSize(wizardData.salarySlipFile.size)})</span>
+                                  )}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  {wizardData.salarySlipFile && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePreviewFile(wizardData.salarySlipFile, 'Salary Slip')}
+                                      className="btn-secondary"
+                                      style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                    >
+                                      <Eye size={12} /> Preview
+                                    </button>
+                                  )}
+                                  <label className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer', margin: 0 }}>
+                                    <RefreshCw size={12} /> Replace
+                                    <input
+                                      type="file"
+                                      accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                      style={{ display: 'none' }}
+                                      onChange={(e) => {
+                                        if (e.target.files?.[0]) handleFileUpload('salarySlipFile', 'salarySlipFileName', e.target.files[0]);
+                                      }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveFile('salarySlipFile', 'salarySlipFileName')}
+                                    className="btn-secondary"
+                                    style={{ padding: '4px 8px', fontSize: '11px', color: '#DC2626', border: '1px solid #FCA5A5' }}
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div style={{ marginTop: '6px' }}>
+                                <label className="btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '6px 14px', fontSize: '12px' }}>
+                                  <Upload size={13} /> Select Salary Slip (PDF / Image)
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                    style={{ display: 'none' }}
+                                    onChange={(e) => {
+                                      if (e.target.files?.[0]) handleFileUpload('salarySlipFile', 'salarySlipFileName', e.target.files[0]);
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* BANK STATEMENT */}
+                          <div style={{ padding: '12px 16px', background: wizardData.bankStatementFileName ? '#F0FDF4' : '#FFF', borderRadius: '10px', border: wizardData.bankStatementFileName ? '1.5px solid #86EFAC' : '1px solid #E2E8F0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                              <span style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
+                                Bank Statement (Latest 6 Months)
+                              </span>
+                              {wizardData.bankStatementFileName && (
+                                <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ Ready</span>
+                              )}
+                            </div>
+
+                            {wizardData.bankStatementFileName ? (
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #DCFCE7' }}>
+                                <div style={{ fontSize: '12px', color: '#166534', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <Paperclip size={14} />
+                                  <span style={{ fontWeight: 600 }}>{wizardData.bankStatementFileName}</span>
+                                  {wizardData.bankStatementFile?.size && (
+                                    <span style={{ fontSize: '11px', color: '#15803D' }}>({formatFileSize(wizardData.bankStatementFile.size)})</span>
+                                  )}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  {wizardData.bankStatementFile && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePreviewFile(wizardData.bankStatementFile, 'Bank Statement')}
+                                      className="btn-secondary"
+                                      style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                    >
+                                      <Eye size={12} /> Preview
+                                    </button>
+                                  )}
+                                  <label className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer', margin: 0 }}>
+                                    <RefreshCw size={12} /> Replace
+                                    <input
+                                      type="file"
+                                      accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                      style={{ display: 'none' }}
+                                      onChange={(e) => {
+                                        if (e.target.files?.[0]) handleFileUpload('bankStatementFile', 'bankStatementFileName', e.target.files[0]);
+                                      }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveFile('bankStatementFile', 'bankStatementFileName')}
+                                    className="btn-secondary"
+                                    style={{ padding: '4px 8px', fontSize: '11px', color: '#DC2626', border: '1px solid #FCA5A5' }}
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div style={{ marginTop: '6px' }}>
+                                <label className="btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '6px 14px', fontSize: '12px' }}>
+                                  <Upload size={13} /> Select Bank Statement (PDF)
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                    style={{ display: 'none' }}
+                                    onChange={(e) => {
+                                      if (e.target.files?.[0]) handleFileUpload('bankStatementFile', 'bankStatementFileName', e.target.files[0]);
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div style={{ display: 'grid', gap: '14px' }}>
-                    {/* PAN CARD */}
-                    <div style={{ padding: '14px 18px', background: '#F8FAFC', borderRadius: '10px', border: '1px solid #E2E8F0' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '13px' }}>1. PAN Card Document *</span>
-                        {wizardData.panCardFileName && (
-                          <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ {wizardData.panCardFileName}</span>
-                        )}
                       </div>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="form-input"
-                        style={{ padding: '6px' }}
-                        onChange={(e) => handleFileUpload('panCardFile', 'panCardFileName', e.target.files[0])}
-                      />
-                    </div>
 
-                    {/* AADHAAR CARD */}
-                    <div style={{ padding: '14px 18px', background: '#F8FAFC', borderRadius: '10px', border: '1px solid #E2E8F0' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '13px' }}>2. Aadhaar Card Document *</span>
-                        {wizardData.aadhaarCardFileName && (
-                          <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ {wizardData.aadhaarCardFileName}</span>
-                        )}
-                      </div>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="form-input"
-                        style={{ padding: '6px' }}
-                        onChange={(e) => handleFileUpload('aadhaarCardFile', 'aadhaarCardFileName', e.target.files[0])}
-                      />
-                    </div>
+                      {/* Section 3: Additional Supporting Document (Optional) */}
+                      <div style={{ padding: '12px 16px', background: wizardData.additionalDocFileName ? '#F0FDF4' : '#F8FAFC', borderRadius: '10px', border: wizardData.additionalDocFileName ? '1.5px solid #86EFAC' : '1px solid #E2E8F0' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                          <span style={{ fontWeight: 700, fontSize: '13px', color: '#201530' }}>
+                            3. Additional Supporting Document (Optional)
+                          </span>
+                          {wizardData.additionalDocFileName && (
+                            <span className="badge badge-purple" style={{ fontSize: '11px' }}>✓ Attached</span>
+                          )}
+                        </div>
 
-                    {/* SALARY SLIP */}
-                    <div style={{ padding: '14px 18px', background: '#F8FAFC', borderRadius: '10px', border: '1px solid #E2E8F0' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '13px' }}>3. Salary Slip / Income Proof *</span>
-                        {wizardData.salarySlipFileName && (
-                          <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ {wizardData.salarySlipFileName}</span>
+                        {wizardData.additionalDocFileName ? (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #E2E8F0' }}>
+                            <div style={{ fontSize: '12px', color: '#5C187B', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <Paperclip size={14} />
+                              <span style={{ fontWeight: 600 }}>{wizardData.additionalDocFileName}</span>
+                              {wizardData.additionalDocFile?.size && (
+                                <span style={{ fontSize: '11px', color: '#6E677B' }}>({formatFileSize(wizardData.additionalDocFile.size)})</span>
+                              )}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              {wizardData.additionalDocFile && (
+                                <button
+                                  type="button"
+                                  onClick={() => handlePreviewFile(wizardData.additionalDocFile, 'Additional Document')}
+                                  className="btn-secondary"
+                                  style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                >
+                                  <Eye size={12} /> Preview
+                                </button>
+                              )}
+                              <label className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer', margin: 0 }}>
+                                <RefreshCw size={12} /> Replace
+                                <input
+                                  type="file"
+                                  accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                  style={{ display: 'none' }}
+                                  onChange={(e) => {
+                                    if (e.target.files?.[0]) handleFileUpload('additionalDocFile', 'additionalDocFileName', e.target.files[0]);
+                                  }}
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveFile('additionalDocFile', 'additionalDocFileName')}
+                                className="btn-secondary"
+                                style={{ padding: '4px 8px', fontSize: '11px', color: '#DC2626', border: '1px solid #FCA5A5' }}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: '6px' }}>
+                            <label className="btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '6px 14px', fontSize: '12px' }}>
+                              <Upload size={13} /> Select Supporting Document (PDF / Image)
+                              <input
+                                type="file"
+                                accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                style={{ display: 'none' }}
+                                onChange={(e) => {
+                                  if (e.target.files?.[0]) handleFileUpload('additionalDocFile', 'additionalDocFileName', e.target.files[0]);
+                                }}
+                              />
+                            </label>
+                          </div>
                         )}
                       </div>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="form-input"
-                        style={{ padding: '6px' }}
-                        onChange={(e) => handleFileUpload('salarySlipFile', 'salarySlipFileName', e.target.files[0])}
-                      />
                     </div>
-
-                    {/* BANK STATEMENT */}
-                    <div style={{ padding: '14px 18px', background: '#F8FAFC', borderRadius: '10px', border: '1px solid #E2E8F0' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '13px' }}>4. Bank Statement (Latest 6 Months) *</span>
-                        {wizardData.bankStatementFileName && (
-                          <span className="badge badge-green" style={{ fontSize: '11px' }}>✓ {wizardData.bankStatementFileName}</span>
-                        )}
-                      </div>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="form-input"
-                        style={{ padding: '6px' }}
-                        onChange={(e) => handleFileUpload('bankStatementFile', 'bankStatementFileName', e.target.files[0])}
-                      />
-                    </div>
-
-                    {/* ADDITIONAL DOCUMENTS (OPTIONAL) */}
-                    <div style={{ padding: '14px 18px', background: '#F8FAFC', borderRadius: '10px', border: '1px solid #E2E8F0' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '13px' }}>5. Additional Document (Optional)</span>
-                        {wizardData.additionalDocFileName && (
-                          <span className="badge badge-purple" style={{ fontSize: '11px' }}>✓ {wizardData.additionalDocFileName}</span>
-                        )}
-                      </div>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="form-input"
-                        style={{ padding: '6px' }}
-                        onChange={(e) => handleFileUpload('additionalDocFile', 'additionalDocFileName', e.target.files[0])}
-                      />
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             )}
 
@@ -1591,7 +2230,17 @@ const LoansPage = () => {
 
               <div className="form-group">
                 <label className="form-label">Select Document File</label>
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg" className="form-input" onChange={(e) => setReuploadDocFileName(e.target.files[0]?.name || '')} required />
+                <input
+                  type="file"
+                  accept=".pdf,.png,.jpg,.jpeg,.webp"
+                  className="form-input"
+                  onChange={(e) => {
+                    const f = e.target.files[0];
+                    setReuploadDocFile(f || null);
+                    setReuploadDocFileName(f?.name || '');
+                  }}
+                  required
+                />
               </div>
 
               <button type="submit" className="btn-primary" style={{ width: '100%', padding: '12px' }} disabled={submitting}>
@@ -1667,6 +2316,415 @@ const LoansPage = () => {
             <button onClick={handleEsignSubmit} className="btn-primary" style={{ width: '100%', padding: '12px' }} disabled={submitting}>
               {submitting ? 'Signing Agreement...' : 'Confirm & Digital e-Sign Loan Agreement ✓'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- CUSTOMER MODAL: APPLICATION DOCUMENTS (VIEW & EDIT) ---------------- */}
+      {docsModalApp && (
+        <div className="modal-overlay">
+          <div className="modal-container" style={{ maxWidth: '800px', width: '92%', maxHeight: '88vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid #EEE7F4', paddingBottom: '12px' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h3 style={{ fontSize: '18px', margin: 0, fontWeight: 700, color: '#201530' }}>
+                    Submitted Documents — {docsModalApp.productName}
+                  </h3>
+                  {getStatusBadge(docsModalApp.status)}
+                </div>
+                <div style={{ fontSize: '12px', color: '#6E677B', marginTop: '2px' }}>
+                  Application #{docsModalApp.applicationNumber || docsModalApp._id} &bull; Applied on {new Date(docsModalApp.createdAt).toLocaleDateString()}
+                </div>
+              </div>
+              <button onClick={() => setDocsModalApp(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6E677B' }}>
+                <X size={22} />
+              </button>
+            </div>
+
+            {/* STATUS BANNER */}
+            {['submitted', 'under_worker_review', 'documents_requested'].includes(docsModalApp.status) ? (
+              <div style={{ padding: '12px 14px', backgroundColor: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: '8px', marginBottom: '16px', fontSize: '12.5px', color: '#166534', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <CheckCircle2 size={16} />
+                <span>
+                  You can review your submitted documents or <strong>Replace / Edit</strong> any file below. Updates are immediately saved and review staff are notified.
+                </span>
+              </div>
+            ) : (
+              <div style={{ padding: '12px 14px', backgroundColor: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px', marginBottom: '16px', fontSize: '12.5px', color: '#64748B' }}>
+                Documents have been processed for this application. You can view or download your submitted files below.
+              </div>
+            )}
+
+            {/* LIST OF DOCUMENTS */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* SECTION A: SCHEME SPECIFIC DOCUMENTS */}
+              {(() => {
+                const specificList = Array.isArray(docsModalApp.documents?.specificDocs) ? [...docsModalApp.documents.specificDocs] : [];
+                const schemeReqs = Array.isArray(docsModalApp.product?.requiredDocuments) && docsModalApp.product.requiredDocuments.length > 0
+                  ? docsModalApp.product.requiredDocuments
+                  : PRESET_DOCUMENTS[docsModalApp.loanType] || [];
+
+                schemeReqs.forEach((req, idx) => {
+                  if (!specificList.some((s) => s.name === req.name || s.schemeIndex === idx)) {
+                    specificList.push({
+                      schemeIndex: idx,
+                      name: req.name,
+                      description: req.description,
+                      isMandatory: req.isMandatory,
+                      docUrl: '',
+                      fileName: '',
+                      status: 'pending',
+                    });
+                  }
+                });
+
+                if (specificList.length === 0) return null;
+
+                const isEditable = ['submitted', 'under_worker_review', 'documents_requested'].includes(docsModalApp.status);
+
+                return (
+                  <div>
+                    <h4 style={{ fontSize: '14px', fontWeight: 700, color: '#5C187B', margin: '0 0 8px 0', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <FileText size={15} /> 1. Scheme-Specific Requirements ({docsModalApp.loanType} Scheme)
+                    </h4>
+                    <div style={{ display: 'grid', gap: '10px' }}>
+                      {specificList.map((doc, idx) => {
+                        const hasUrl = Boolean(doc.docUrl);
+                        const isUpdating = docUpdatingKey === `specific_${doc.name}`;
+
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              padding: '12px 14px',
+                              background: hasUrl ? '#FFF' : '#F8FAFC',
+                              borderRadius: '8px',
+                              border: hasUrl ? '1px solid #E2E8F0' : '1px dashed #CBD5E1',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              flexWrap: 'wrap',
+                              gap: '10px',
+                            }}
+                          >
+                            <div style={{ flex: 1, minWidth: '220px' }}>
+                              <div style={{ fontWeight: 600, fontSize: '13px', color: '#201530' }}>
+                                📄 {doc.name}{' '}
+                                {doc.isMandatory && !hasUrl && (
+                                  <span style={{ color: '#DC2626', fontSize: '11px', fontWeight: 700 }}>(Mandatory)</span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: '11.5px', color: '#6E677B', marginTop: '2px' }}>
+                                {hasUrl ? (
+                                  <span style={{ color: '#166534', fontWeight: 500 }}>
+                                    ✓ {doc.fileName || 'Uploaded file'}
+                                  </span>
+                                ) : doc.fileName ? (
+                                  <span style={{ color: '#D97706', fontWeight: 500 }}>
+                                    ⚠️ {doc.fileName} (Upload pending)
+                                  </span>
+                                ) : (
+                                  <span>{doc.description || 'Scheme verification file'}</span>
+                                )}{' '}
+                                &bull;{' '}
+                                <span style={{ textTransform: 'uppercase', fontWeight: 600, color: hasUrl ? '#059669' : '#DC2626' }}>
+                                  {hasUrl ? (doc.status || 'Uploaded') : 'Pending Upload'}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              {hasUrl && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePreviewUrl(doc.docUrl, doc.name)}
+                                    className="btn-secondary"
+                                    style={{ padding: '5px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                  >
+                                    <Eye size={12} /> Preview
+                                  </button>
+                                  <a
+                                    href={resolveDocUrl(doc.docUrl)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="btn-secondary"
+                                    style={{ padding: '5px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', textDecoration: 'none' }}
+                                  >
+                                    <ExternalLink size={12} /> Open ↗
+                                  </a>
+                                  <a
+                                    href={resolveDocUrl(doc.docUrl)}
+                                    download={doc.fileName || `${doc.name}.pdf`}
+                                    className="btn-secondary"
+                                    style={{ padding: '5px 8px', fontSize: '11px', textDecoration: 'none' }}
+                                    title="Download Document"
+                                  >
+                                    <Download size={12} />
+                                  </a>
+                                </>
+                              )}
+
+                              {isEditable && (
+                                <label
+                                  className={hasUrl ? 'btn-secondary' : 'btn-primary'}
+                                  style={{ padding: '5px 12px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: isUpdating ? 'wait' : 'pointer', margin: 0 }}
+                                >
+                                  <RefreshCw size={12} className={isUpdating ? 'spin' : ''} />
+                                  {isUpdating ? 'Uploading...' : hasUrl ? 'Replace File' : 'Upload File'}
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                    style={{ display: 'none' }}
+                                    disabled={isUpdating}
+                                    onChange={(e) => {
+                                      if (e.target.files?.[0]) {
+                                        handleUpdateAppDoc(docsModalApp._id, e.target.files[0], 'specific', doc.name, doc.schemeIndex ?? idx);
+                                      }
+                                    }}
+                                  />
+                                </label>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* SECTION B: STANDARD PROOFS */}
+              <div>
+                <h4 style={{ fontSize: '14px', fontWeight: 700, color: '#5C187B', margin: '0 0 8px 0', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <ShieldCheck size={15} /> 2. Standard Identity &amp; Financial Proofs
+                </h4>
+                <div style={{ display: 'grid', gap: '10px' }}>
+                  {[
+                    { key: 'pan', label: 'PAN Card', url: docsModalApp.documents?.panCardUrl, fileName: docsModalApp.documents?.panCardFileName || 'pan_card.pdf' },
+                    { key: 'aadhaar', label: 'Aadhaar Card', url: docsModalApp.documents?.aadhaarCardUrl, fileName: docsModalApp.documents?.aadhaarCardFileName || 'aadhaar_card.pdf' },
+                    { key: 'salary', label: 'Salary Slip / Income Proof', url: docsModalApp.documents?.salarySlipUrl, fileName: docsModalApp.documents?.salarySlipFileName || 'salary_slip.pdf' },
+                    { key: 'bank', label: 'Bank Statement', url: docsModalApp.documents?.bankStatementUrl, fileName: docsModalApp.documents?.bankStatementFileName || 'bank_statement.pdf' },
+                  ].map((std) => {
+                    const hasUrl = Boolean(std.url);
+                    const isEditable = ['submitted', 'under_worker_review', 'documents_requested'].includes(docsModalApp.status);
+                    const isUpdating = docUpdatingKey === `${std.key}_${std.label}`;
+
+                    return (
+                      <div
+                        key={std.key}
+                        style={{
+                          padding: '12px 14px',
+                          background: hasUrl ? '#FFF' : '#F8FAFC',
+                          borderRadius: '8px',
+                          border: hasUrl ? '1px solid #E2E8F0' : '1px dashed #CBD5E1',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '10px',
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: '220px' }}>
+                          <div style={{ fontWeight: 600, fontSize: '13px', color: '#201530' }}>
+                            🪪 {std.label}
+                          </div>
+                          <div style={{ fontSize: '11.5px', color: '#6E677B', marginTop: '2px' }}>
+                            {hasUrl ? (
+                              <span style={{ color: '#166534', fontWeight: 500 }}>✓ {std.fileName}</span>
+                            ) : (
+                              <span>Not uploaded directly</span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          {hasUrl && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handlePreviewUrl(std.url, std.label)}
+                                className="btn-secondary"
+                                style={{ padding: '5px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                              >
+                                <Eye size={12} /> Preview
+                              </button>
+                              <a
+                                href={resolveDocUrl(std.url)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="btn-secondary"
+                                style={{ padding: '5px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', textDecoration: 'none' }}
+                              >
+                                <ExternalLink size={12} /> Open ↗
+                              </a>
+                              <a
+                                href={resolveDocUrl(std.url)}
+                                download={std.fileName}
+                                className="btn-secondary"
+                                style={{ padding: '5px 8px', fontSize: '11px', textDecoration: 'none' }}
+                              >
+                                <Download size={12} />
+                              </a>
+                            </>
+                          )}
+
+                          {isEditable && (
+                            <label
+                              className={hasUrl ? 'btn-secondary' : 'btn-primary'}
+                              style={{ padding: '5px 12px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: isUpdating ? 'wait' : 'pointer', margin: 0 }}
+                            >
+                              <RefreshCw size={12} className={isUpdating ? 'spin' : ''} />
+                              {isUpdating ? 'Uploading...' : hasUrl ? 'Replace File' : 'Upload File'}
+                              <input
+                                type="file"
+                                accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                style={{ display: 'none' }}
+                                disabled={isUpdating}
+                                onChange={(e) => {
+                                  if (e.target.files?.[0]) {
+                                    handleUpdateAppDoc(docsModalApp._id, e.target.files[0], std.key, std.label);
+                                  }
+                                }}
+                              />
+                            </label>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* SECTION C: ADDITIONAL DOCUMENTS */}
+              {Array.isArray(docsModalApp.documents?.additionalDocs) && docsModalApp.documents.additionalDocs.length > 0 && (
+                <div>
+                  <h4 style={{ fontSize: '14px', fontWeight: 700, color: '#D97706', margin: '0 0 8px 0', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Paperclip size={15} /> 3. Additional Requested Documents
+                  </h4>
+                  <div style={{ display: 'grid', gap: '10px' }}>
+                    {docsModalApp.documents.additionalDocs.map((addDoc, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          padding: '12px 14px',
+                          background: addDoc.status === 'uploaded' ? '#ECFDF5' : '#FFFBEB',
+                          borderRadius: '8px',
+                          border: `1px solid ${addDoc.status === 'uploaded' ? '#A7F3D0' : '#FDE68A'}`,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '10px',
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: '220px' }}>
+                          <div style={{ fontWeight: 600, fontSize: '13px', color: '#201530' }}>
+                            📌 {addDoc.title || 'Additional Document'}
+                          </div>
+                          <div style={{ fontSize: '11.5px', color: '#6E677B', marginTop: '2px' }}>
+                            {addDoc.docUrl ? (
+                              <span style={{ color: '#166534', fontWeight: 500 }}>✓ {addDoc.fileName || 'Uploaded'}</span>
+                            ) : (
+                              <span>Pending customer upload</span>
+                            )}{' '}
+                            &bull;{' '}
+                            <span style={{ textTransform: 'uppercase', fontWeight: 600, color: addDoc.status === 'uploaded' ? '#059669' : '#D97706' }}>
+                              {addDoc.status}
+                            </span>
+                          </div>
+                        </div>
+
+                        {addDoc.docUrl && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <button
+                              type="button"
+                              onClick={() => handlePreviewUrl(addDoc.docUrl, addDoc.title)}
+                              className="btn-secondary"
+                              style={{ padding: '5px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                            >
+                              <Eye size={12} /> Preview
+                            </button>
+                            <a
+                              href={resolveDocUrl(addDoc.docUrl)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="btn-secondary"
+                              style={{ padding: '5px 10px', fontSize: '11px', textDecoration: 'none' }}
+                            >
+                              Open ↗
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginTop: '20px', textAlign: 'right', borderTop: '1px solid #EEE7F4', paddingTop: '12px' }}>
+              <button
+                type="button"
+                onClick={() => setDocsModalApp(null)}
+                className="btn-primary"
+                style={{ padding: '8px 20px', fontSize: '13px' }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- UNIVERSAL IN-APP DOCUMENT PREVIEW MODAL ---------------- */}
+      {docPreviewModal && (
+        <div className="modal-overlay" style={{ zIndex: 1100 }}>
+          <div className="modal-container" style={{ maxWidth: '900px', width: '94%', maxHeight: '92vh', display: 'flex', flexDirection: 'column', padding: '18px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid #EEE7F4', paddingBottom: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Eye size={18} color="#5C187B" />
+                <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#201530' }}>
+                  {docPreviewModal.title || 'Document Preview'}
+                </h4>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <a
+                  href={docPreviewModal.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn-secondary"
+                  style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px', textDecoration: 'none' }}
+                >
+                  <ExternalLink size={12} /> Open in New Tab
+                </a>
+                <button
+                  type="button"
+                  onClick={closeDocPreview}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6E677B' }}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#F8FAFC', borderRadius: '8px', padding: '10px' }}>
+              {docPreviewModal.mimeType?.startsWith('image/') ||
+              docPreviewModal.url?.match(/\.(jpg|jpeg|png|webp|gif)/i) ||
+              docPreviewModal.title?.match(/\.(jpg|jpeg|png|webp|gif)$/i) ? (
+                <img
+                  src={docPreviewModal.url}
+                  alt={docPreviewModal.title}
+                  style={{ maxWidth: '100%', maxHeight: '72vh', objectFit: 'contain', borderRadius: '6px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
+                />
+              ) : (
+                <iframe
+                  src={docPreviewModal.url}
+                  title={docPreviewModal.title}
+                  style={{ width: '100%', height: '72vh', border: 'none', borderRadius: '6px', backgroundColor: '#FFF' }}
+                />
+              )}
+            </div>
           </div>
         </div>
       )}

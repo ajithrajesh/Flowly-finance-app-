@@ -29,14 +29,19 @@ import cashWithdrawalRoutes from "./routes/cashWithdrawalRoutes.js";
 import supportTicketRoutes from "./routes/supportTicketRoutes.js";
 import transferRoutes from "./routes/transferRoutes.js";
 import statementRoutes from "./routes/statementRoutes.js";
+import documentRoutes from "./routes/documentRoutes.js";
 import { startOverdueCheckJob } from "./jobs/overdueCheckJob.js";
 import { startFDMaturityJob } from "./jobs/fdMaturityJob.js";
 import { startEmiReminderJob } from "./jobs/emiReminderJob.js";
 import { startVideoKycReminderJob } from "./jobs/videoKycReminderJob.js";
 import { startMonthlyStatementJob } from "./jobs/monthlyStatementJob.js";
 import { ensureDefaultSupportTeam } from "./services/ticketAssignmentService.js";
+import { validateJwtSecretEnv } from "./config/jwt.js";
 
 dotenv.config();
+
+// Enforce strong JWT secret configuration on startup; fail securely if missing or insecure
+validateJwtSecretEnv({ exitOnError: process.env.NODE_ENV !== "test" });
 
 connectDB().then(() => {
   ensureDefaultSupportTeam().catch((err) => console.error("Support team initialization error:", err.message));
@@ -51,25 +56,9 @@ app.use("/api/webhooks", webhookRoutes);
 
 app.use(express.json());
 
-// Serve uploaded KYC documents (images/PDFs) as static files
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-// Resilient fallback for document viewing: if requested file is missing on disk, serve the sample document
-app.get("/uploads/:filename", (req, res) => {
-  const requestedFile = req.params.filename || "sample_pan.pdf";
-  const safeFilename = path.basename(requestedFile);
-  const targetPath = path.join(__dirname, "uploads", safeFilename);
-  if (fs.existsSync(targetPath)) {
-    return res.sendFile(targetPath);
-  }
-  const fallbackSample = path.join(__dirname, "uploads", "sample_pan.pdf");
-  if (fs.existsSync(fallbackSample)) {
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="${safeFilename}"`);
-    return res.sendFile(fallbackSample);
-  }
-  res.status(404).send("Document not found");
-});
+// Secure document preview & download routes (requires authentication, ownership checks, role-based authorization)
+app.use("/uploads", documentRoutes);
+app.use("/api/documents", documentRoutes);
 
 
 // Health Check

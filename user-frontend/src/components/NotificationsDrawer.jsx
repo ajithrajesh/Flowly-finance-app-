@@ -246,7 +246,107 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
     }
   };
 
-  // Report Transfer Modal State
+  const handleActionClick = (route, id, unread) => {
+    if (unread && id) {
+      handleMarkRead(id);
+    }
+    if (onClose) onClose();
+    if (route) navigate(route);
+  };
+
+  // Helper to determine if notification represents a money credit, debit, or transaction
+  const isTransactionNotification = (item) => {
+    if (!item) return false;
+    const type = String(item.type || '').toLowerCase();
+    if (['transfer', 'deposit', 'withdrawal', 'payment', 'transaction'].includes(type)) {
+      return true;
+    }
+    if (item.meta && (item.meta.receiptNumber || item.meta.transactionId || item.meta.paymentId || item.meta.transferId || item.meta.amount)) {
+      return true;
+    }
+    const text = `${item.title || ''} ${item.message || ''}`.toLowerCase();
+    const txnKeywords = [
+      'credited',
+      'debited',
+      'transferred',
+      'transfer sent',
+      'transfer received',
+      'cash deposit',
+      'cash withdrawal',
+      'withdrawn',
+      'deposited',
+      'money added',
+      'payment received',
+      'payment sent',
+      'emi paid',
+      'loan disbursed',
+      'sent to',
+      'received from',
+    ];
+    return txnKeywords.some((kw) => text.includes(kw));
+  };
+
+  // Helper to determine if transaction is a debit (funds outgoing / withdrawn / sent)
+  const isDebitNotification = (item) => {
+    if (!item) return false;
+    const type = String(item.type || '').toLowerCase();
+    if (type === 'withdrawal') return true;
+    if (item.meta?.type === 'debit' || item.meta?.direction === 'debit' || item.meta?.transactionType === 'debit') return true;
+    const text = `${item.title || ''} ${item.message || ''}`.toLowerCase();
+    const debitKeywords = [
+      'debited',
+      'transfer sent',
+      'card transfer sent',
+      'withdrawn',
+      'cash withdrawal',
+      'sent to',
+      'deducted',
+      'paid ₹',
+      'payment sent',
+      'emi paid',
+      'paid to',
+    ];
+    return debitKeywords.some((kw) => text.includes(kw));
+  };
+
+  const handleReportProblem = (item) => {
+    if (!item) return;
+
+    let category = 'payment';
+    const isDebit = isDebitNotification(item);
+    const notifTitle = item.title || 'Transaction';
+    const notifMessage = item.message || '';
+    const notifTime = item.createdAt ? new Date(item.createdAt).toLocaleString() : new Date().toLocaleString();
+
+    let subject = isDebit
+      ? `Report Debit: ${notifTitle}`
+      : `Transaction Inquiry: ${notifTitle}`;
+    if (subject.length > 120) {
+      subject = subject.slice(0, 117) + '...';
+    }
+
+    const description = `Regarding transaction notification: "${notifTitle}"\nMessage: ${notifMessage}\nDate: ${notifTime}\nType: ${isDebit ? 'Money Debited (Freeze requested)' : 'Money Credited / Financial'}\n\nPlease describe the issue: `;
+
+    if (!isRead(item)) {
+      handleMarkRead(item._id || item.id);
+    }
+    if (onClose) onClose();
+    navigate('/help?tab=create', {
+      state: {
+        activeTab: 'create',
+        tab: 'create',
+        category,
+        priority: isDebit ? 'urgent' : 'high',
+        subject,
+        description,
+        notificationId: item._id || item.id,
+        fromNotification: notifTitle,
+        isDebit,
+      },
+    });
+  };
+
+  // Report Transaction Modal State
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [reportingItem, setReportingItem] = useState(null);
   const [reportReason, setReportReason] = useState('Unauthorized / suspicious transaction');
@@ -255,8 +355,14 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
   const [reportSuccess, setReportSuccess] = useState('');
 
   const handleOpenReport = (item) => {
+    if (!item) return;
+    const isDebit = isDebitNotification(item);
     setReportingItem(item);
-    setReportReason('Unauthorized / suspicious transaction');
+    setReportReason(
+      isDebit
+        ? 'Unauthorized / suspicious debit transaction'
+        : 'Disputed transaction / incorrect amount credited'
+    );
     setReportError('');
     setReportSuccess('');
     setReportModalOpen(true);
@@ -277,10 +383,13 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
     try {
       const receiptNumber = reportingItem.meta?.receiptNumber;
       const notificationId = reportingItem._id || reportingItem.id;
+      const isDebit = isDebitNotification(reportingItem);
+
       const res = await transferAPI.reportTransfer({
         notificationId,
         receiptNumber,
-        reason: reportReason.trim() || 'Unauthorized / suspicious transfer',
+        isDebit,
+        reason: reportReason.trim() || (isDebit ? 'Unauthorized / suspicious debit' : 'Transaction inquiry'),
       });
 
       // Update notification in local state
@@ -289,25 +398,34 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
           (n._id === notificationId || n.id === notificationId)
             ? {
                 ...n,
-                meta: { ...(n.meta || {}), reported: true, reportedAt: new Date() },
+                meta: { ...(n.meta || {}), reported: true, reportedAt: new Date(), isDebitReport: isDebit },
               }
             : n
         )
       );
 
-      setReportSuccess(res.data?.message || 'Transfer reported. Account temporarily suspended.');
-
-      // Dispatch global events so user profile & account reflect "suspended"
-      window.dispatchEvent(new CustomEvent('flowly:account-suspended'));
-      window.dispatchEvent(new CustomEvent('flowly:account-update'));
+      if (isDebit) {
+        setReportSuccess(
+          res.data?.message ||
+          'Debit reported successfully. Outgoing money transactions have been blocked for your protection.'
+        );
+        // Dispatch global events so user profile & account reflect "suspended"
+        window.dispatchEvent(new CustomEvent('flowly:account-suspended'));
+        window.dispatchEvent(new CustomEvent('flowly:account-update'));
+      } else {
+        setReportSuccess(
+          res.data?.message ||
+          'Transaction inquiry submitted. Our support team is investigating the issue.'
+        );
+      }
 
       setTimeout(() => {
         setReportModalOpen(false);
         setReportingItem(null);
         setReportSuccess('');
-      }, 1600);
+      }, 2200);
     } catch (err) {
-      setReportError(err.response?.data?.message || err.message || 'Failed to report transfer');
+      setReportError(err.response?.data?.message || err.message || 'Failed to report transaction');
     } finally {
       setReportingLoading(false);
     }
@@ -640,7 +758,7 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
                       }}
                     >
                       {/* Left controls: Optional Action Button & Report Option */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         {config.actionRoute && (
                           <button
                             onClick={() => handleActionClick(config.actionRoute, item._id || item.id, unread)}
@@ -661,50 +779,58 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
                           </button>
                         )}
 
-                        {/* Report Option for Transfer Notifications */}
-                        {item.type === 'transfer' && (
-                          item.meta?.reported || item.status === 'reported' ? (
-                            <span
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                padding: '2px 7px',
-                                borderRadius: '5px',
-                                fontSize: '10.5px',
-                                fontWeight: 700,
-                                backgroundColor: '#FEE2E2',
-                                color: '#B91C1C',
-                                border: '1px solid #FECACA',
-                              }}
-                            >
-                              <ShieldAlert size={11} /> Reported
-                            </span>
-                          ) : (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleOpenReport(item);
-                              }}
-                              style={{
-                                background: '#FEF2F2',
-                                border: '1px solid #FECACA',
-                                color: '#DC2626',
-                                borderRadius: '5px',
-                                padding: '2px 8px',
-                                fontSize: '11px',
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                transition: 'all 0.15s ease',
-                              }}
-                              title="Report suspicious or unauthorized transfer"
-                            >
-                              <AlertTriangle size={11} /> Report
-                            </button>
-                          )
+                        {/* Report button ONLY for money credited, debited, or other transaction notifications */}
+                        {isTransactionNotification(item) && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenReport(item);
+                            }}
+                            style={{
+                              background: isDebitNotification(item) ? '#FEF2F2' : '#EFF6FF',
+                              border: `1px solid ${isDebitNotification(item) ? '#FECACA' : '#BFDBFE'}`,
+                              color: isDebitNotification(item) ? '#DC2626' : '#2563EB',
+                              borderRadius: '5px',
+                              padding: '2px 8px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              transition: 'all 0.15s ease',
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = isDebitNotification(item) ? '#FEE2E2' : '#DBEAFE';
+                              e.currentTarget.style.color = isDebitNotification(item) ? '#B91C1C' : '#1D4ED8';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = isDebitNotification(item) ? '#FEF2F2' : '#EFF6FF';
+                              e.currentTarget.style.color = isDebitNotification(item) ? '#DC2626' : '#2563EB';
+                            }}
+                            title={isDebitNotification(item) ? "Report debit & block transactions for protection" : "Report transaction issue"}
+                          >
+                            <AlertTriangle size={11} /> {isDebitNotification(item) ? 'Report Debit' : 'Report Issue'}
+                          </button>
+                        )}
+
+                        {(item.meta?.reported || item.status === 'reported') && (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '3px',
+                              padding: '2px 7px',
+                              borderRadius: '5px',
+                              fontSize: '10.5px',
+                              fontWeight: 700,
+                              backgroundColor: '#FEE2E2',
+                              color: '#B91C1C',
+                              border: '1px solid #FECACA',
+                            }}
+                          >
+                            <ShieldAlert size={11} /> Reported
+                          </span>
                         )}
                       </div>
 
@@ -757,238 +883,349 @@ const NotificationsDrawer = ({ isOpen, onClose, onRefreshCount }) => {
       </div>
 
       {/* ======================================================== */}
-      {/* REPORT TRANSFER CONFIRMATION MODAL                      */}
+      {/* REPORT TRANSACTION CONFIRMATION MODAL                   */}
       {/* ======================================================== */}
-      {reportModalOpen && reportingItem && (
-        <div
-          className="modal-overlay"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(32, 21, 48, 0.6)',
-            backdropFilter: 'blur(3px)',
-            zIndex: 200,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-          }}
-        >
+      {reportModalOpen && reportingItem && (() => {
+        const isDebit = isDebitNotification(reportingItem);
+        return (
           <div
+            className="modal-overlay"
             style={{
-              width: '100%',
-              maxWidth: '440px',
-              backgroundColor: '#FFFFFF',
-              borderRadius: '16px',
-              padding: '24px',
-              boxShadow: '0 20px 40px rgba(32, 21, 48, 0.25)',
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(32, 21, 48, 0.6)',
+              backdropFilter: 'blur(3px)',
+              zIndex: 200,
               display: 'flex',
-              flexDirection: 'column',
-              gap: '16px',
-              animation: 'scaleUp 0.15s ease-out',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '16px',
             }}
           >
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <div
-                style={{
-                  width: '42px',
-                  height: '42px',
-                  borderRadius: '12px',
-                  backgroundColor: '#FEE2E2',
-                  color: '#DC2626',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                }}
-              >
-                <AlertTriangle size={22} />
-              </div>
-              <div>
-                <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 800, color: '#1F2937' }}>
-                  Report Transfer
-                </h3>
-                <p style={{ margin: 0, fontSize: '12px', color: '#6B7280' }}>
-                  Security action & account protection
-                </p>
-              </div>
-            </div>
-
-            {/* Security Warning Alert */}
             <div
               style={{
-                padding: '12px 14px',
-                borderRadius: '10px',
-                backgroundColor: '#FEF2F2',
-                border: '1.5px solid #FCA5A5',
-                color: '#991B1B',
-                fontSize: '12.5px',
-                lineHeight: 1.45,
-              }}
-            >
-              <div style={{ fontWeight: 800, marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <ShieldAlert size={14} /> Account will be temporarily suspended
-              </div>
-              Reporting this transfer will update the transaction status to reported and suspend your account with <strong>"Account temporarily suspended."</strong> for your security. Only an authorized bank worker can investigate and re-enable transactions.
-            </div>
-
-            {/* Transfer Details Card */}
-            <div
-              style={{
-                padding: '12px 14px',
-                borderRadius: '10px',
-                backgroundColor: '#F9FAFB',
-                border: '1px solid #E5E7EB',
-                fontSize: '12.5px',
-                color: '#374151',
+                width: '100%',
+                maxWidth: '460px',
+                backgroundColor: '#FFFFFF',
+                borderRadius: '16px',
+                padding: '24px',
+                boxShadow: '0 20px 40px rgba(32, 21, 48, 0.25)',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '6px',
+                gap: '16px',
+                animation: 'scaleUp 0.15s ease-out',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#6B7280' }}>Notification</span>
-                <span style={{ fontWeight: 600 }}>{reportingItem.title}</span>
+              {/* Header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div
+                  style={{
+                    width: '42px',
+                    height: '42px',
+                    borderRadius: '12px',
+                    backgroundColor: isDebit ? '#FEE2E2' : '#EFF6FF',
+                    color: isDebit ? '#DC2626' : '#2563EB',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <AlertTriangle size={22} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 800, color: '#1F2937' }}>
+                    {isDebit ? 'Report Debit & Freeze Transactions' : 'Report Credited Transaction'}
+                  </h3>
+                  <p style={{ margin: 0, fontSize: '12px', color: '#6B7280' }}>
+                    {isDebit ? 'Security action: Outgoing money transactions will be blocked' : 'Financial inquiry & support investigation'}
+                  </p>
+                </div>
               </div>
-              {reportingItem.meta?.receiptNumber && (
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: '#6B7280' }}>Reference</span>
-                  <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#5C187B' }}>
-                    {reportingItem.meta.receiptNumber}
-                  </span>
-                </div>
-              )}
-              {reportingItem.meta?.amount && (
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: '#6B7280' }}>Amount</span>
-                  <span style={{ fontWeight: 700, color: '#111827' }}>
-                    ₹{Number(reportingItem.meta.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </span>
-                </div>
-              )}
-            </div>
 
-            {/* Reason input */}
-            <div>
-              <label
+              {/* Warning or Info Banner */}
+              {isDebit ? (
+                <div
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: '10px',
+                    backgroundColor: '#FEF2F2',
+                    border: '1.5px solid #FCA5A5',
+                    color: '#991B1B',
+                    fontSize: '12.5px',
+                    lineHeight: 1.45,
+                  }}
+                >
+                  <div style={{ fontWeight: 800, marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <ShieldAlert size={14} /> Outgoing Transactions Will Be Blocked
+                  </div>
+                  Reporting this debit will immediately block further money transactions on your account with <strong>"Account temporarily suspended"</strong> to protect your funds against unauthorized loss. An authorized bank worker will review this transaction report and enable transactions back from the worker desk once verified.
+                </div>
+              ) : (
+                <div
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: '10px',
+                    backgroundColor: '#EFF6FF',
+                    border: '1.5px solid #BFDBFE',
+                    color: '#1E40AF',
+                    fontSize: '12.5px',
+                    lineHeight: 1.45,
+                  }}
+                >
+                  <div style={{ fontWeight: 800, marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <CheckCircle2 size={14} /> Transaction Inquiry
+                  </div>
+                  Report an issue regarding this credited transaction (e.g. unknown sender, wrong deposit amount, duplicate credit). A priority support ticket will be opened for investigation. Your outgoing money transactions will remain active.
+                </div>
+              )}
+
+              {/* Transaction Details Card */}
+              <div
                 style={{
-                  display: 'block',
+                  padding: '12px 14px',
+                  borderRadius: '10px',
+                  backgroundColor: '#F9FAFB',
+                  border: '1px solid #E5E7EB',
                   fontSize: '12.5px',
-                  fontWeight: 700,
                   color: '#374151',
-                  marginBottom: '6px',
-                }}
-              >
-                Reason for reporting <span style={{ color: '#DC2626' }}>*</span>
-              </label>
-              <textarea
-                value={reportReason}
-                onChange={(e) => setReportReason(e.target.value)}
-                rows={2}
-                placeholder="e.g. Unauthorized transaction, suspected fraud..."
-                disabled={reportingLoading}
-                style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  borderRadius: '8px',
-                  border: '1.5px solid #D1D5DB',
-                  fontSize: '13px',
-                  fontFamily: 'inherit',
-                  outline: 'none',
-                  boxSizing: 'border-box',
-                  resize: 'vertical',
-                }}
-              />
-            </div>
-
-            {/* Feedback messages */}
-            {reportError && (
-              <div
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  backgroundColor: '#FEE2E2',
-                  color: '#B91C1C',
-                  fontSize: '12px',
-                  fontWeight: 600,
                   display: 'flex',
-                  alignItems: 'center',
+                  flexDirection: 'column',
                   gap: '6px',
                 }}
               >
-                <AlertCircle size={14} /> {reportError}
-              </div>
-            )}
-
-            {reportSuccess && (
-              <div
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  backgroundColor: '#DEF7EC',
-                  color: '#03543F',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
-              >
-                <CheckCircle2 size={14} /> {reportSuccess}
-              </div>
-            )}
-
-            {/* Action Buttons */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '4px' }}>
-              <button
-                type="button"
-                onClick={handleCloseReport}
-                disabled={reportingLoading}
-                style={{
-                  padding: '9px 16px',
-                  borderRadius: '8px',
-                  border: '1px solid #D1D5DB',
-                  backgroundColor: '#FFFFFF',
-                  color: '#374151',
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  cursor: reportingLoading ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmReport}
-                disabled={reportingLoading || !!reportSuccess}
-                style={{
-                  padding: '9px 18px',
-                  borderRadius: '8px',
-                  border: 'none',
-                  backgroundColor: '#DC2626',
-                  color: '#FFFFFF',
-                  fontSize: '13px',
-                  fontWeight: 700,
-                  cursor: reportingLoading || !!reportSuccess ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  boxShadow: '0 2px 8px rgba(220, 38, 38, 0.3)',
-                }}
-              >
-                {reportingLoading ? (
-                  'Reporting...'
-                ) : (
-                  <>
-                    <AlertTriangle size={14} /> Report & Suspend
-                  </>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#6B7280' }}>Notification</span>
+                  <span style={{ fontWeight: 600 }}>{reportingItem.title}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#6B7280' }}>Transaction Type</span>
+                  <span className={`badge ${isDebit ? 'badge-red' : 'badge-blue'}`} style={{ fontSize: '11px', textTransform: 'uppercase' }}>
+                    {isDebit ? 'Money Debited' : 'Money Credited'}
+                  </span>
+                </div>
+                {reportingItem.meta?.receiptNumber && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#6B7280' }}>Reference</span>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#5C187B' }}>
+                      {reportingItem.meta.receiptNumber}
+                    </span>
+                  </div>
                 )}
-              </button>
+                {reportingItem.meta?.amount && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#6B7280' }}>Amount</span>
+                    <span style={{ fontWeight: 700, color: isDebit ? '#DC2626' : '#059669' }}>
+                      {isDebit ? '-' : '+'}₹{Number(reportingItem.meta.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Reason input */}
+              <div>
+                <label
+                  style={{
+                    display: 'block',
+                    fontSize: '12.5px',
+                    fontWeight: 700,
+                    color: '#374151',
+                    marginBottom: '6px',
+                  }}
+                >
+                  Reason for reporting <span style={{ color: '#DC2626' }}>*</span>
+                </label>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                  {isDebit ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('Unauthorized / suspicious debit transaction')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Unauthorized Debit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('I did not authorize or make this debit')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Did Not Authorize
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('Debited more than expected / wrong amount')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Incorrect Amount
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('Duplicate deduction / charged twice')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Duplicate Deduction
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('Unrecognized sender / unexpected funds credited')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Unknown Sender
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('Deposit amount mismatch')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Amount Mismatch
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportReason('Duplicate credit received')}
+                        style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', background: '#F3F4F6', cursor: 'pointer' }}
+                      >
+                        Duplicate Credit
+                      </button>
+                    </>
+                  )}
+                </div>
+                <textarea
+                  value={reportReason}
+                  onChange={(e) => setReportReason(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. Unauthorized transaction, suspected fraud..."
+                  disabled={reportingLoading}
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    borderRadius: '8px',
+                    border: '1.5px solid #D1D5DB',
+                    fontSize: '13px',
+                    fontFamily: 'inherit',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    resize: 'vertical',
+                  }}
+                />
+              </div>
+
+              {/* Feedback messages */}
+              {reportError && (
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    backgroundColor: '#FEE2E2',
+                    color: '#B91C1C',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <AlertCircle size={14} /> {reportError}
+                </div>
+              )}
+
+              {reportSuccess && (
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    backgroundColor: '#DEF7EC',
+                    color: '#03543F',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <CheckCircle2 size={14} /> {reportSuccess}
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleCloseReport();
+                    handleReportProblem(reportingItem);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#5C187B',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                    padding: 0,
+                  }}
+                >
+                  Detailed Ticket in Help Center ↗
+                </button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={handleCloseReport}
+                    disabled={reportingLoading}
+                    style={{
+                      padding: '9px 16px',
+                      borderRadius: '8px',
+                      border: '1px solid #D1D5DB',
+                      backgroundColor: '#FFFFFF',
+                      color: '#374151',
+                      fontSize: '13px',
+                      fontWeight: 600,
+                      cursor: reportingLoading ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmReport}
+                    disabled={reportingLoading || !!reportSuccess}
+                    style={{
+                      padding: '9px 18px',
+                      borderRadius: '8px',
+                      border: 'none',
+                      backgroundColor: isDebit ? '#DC2626' : '#2563EB',
+                      color: '#FFFFFF',
+                      fontSize: '13px',
+                      fontWeight: 700,
+                      cursor: reportingLoading || !!reportSuccess ? 'not-allowed' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      boxShadow: isDebit ? '0 2px 8px rgba(220, 38, 38, 0.3)' : '0 2px 8px rgba(37, 99, 235, 0.3)',
+                    }}
+                  >
+                    {reportingLoading ? (
+                      'Submitting...'
+                    ) : isDebit ? (
+                      <>
+                        <ShieldAlert size={14} /> Report & Block Transactions
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 size={14} /> Submit Inquiry
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

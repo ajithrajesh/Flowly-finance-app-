@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import UserAvatar from './UserAvatar';
 import { 
   Shield, 
   Wallet, 
@@ -230,28 +231,35 @@ const Navbar = ({ onOpenNotifications, unreadCount = 0 }) => {
 
               {/* User Profile Badge & Logout */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', paddingLeft: '8px', borderLeft: '1px solid #E7E4DC' }}>
-                <div style={{
-                  width: '36px',
-                  height: '36px',
-                  borderRadius: '50%',
-                  backgroundColor: '#EEE7F4',
-                  color: '#5C187B',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 700,
-                  fontSize: '14px',
-                  border: '1.5px solid #8B5CF6'
-                }}>
-                  {user?.name?.charAt(0).toUpperCase() || 'U'}
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column' }} className="user-text-meta">
-                  <span style={{ fontSize: '13px', fontWeight: 700, color: '#201530', lineHeight: 1.2 }}>
-                    {user?.name}
-                  </span>
-                  <span style={{ fontSize: '11px', color: '#6E677B' }}>
-                    {account ? `₹${account.balance.toLocaleString('en-IN')}` : user?.phone}
-                  </span>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => navigate('/profile')}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate('/profile'); }}
+                  style={{
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    padding: '4px 8px',
+                    borderRadius: '8px',
+                    transition: 'background-color 0.15s ease',
+                    userSelect: 'none',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#F7F5FA'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                  title="View & Edit Profile"
+                  aria-label="View user profile"
+                >
+                  <UserAvatar user={user} size={36} />
+                  <div style={{ display: 'flex', flexDirection: 'column' }} className="user-text-meta">
+                    <span style={{ fontSize: '13px', fontWeight: 700, color: '#201530', lineHeight: 1.2 }}>
+                      {user?.name}
+                    </span>
+                    <span style={{ fontSize: '11px', color: '#6E677B' }}>
+                      {account ? `₹${account.balance.toLocaleString('en-IN')}` : user?.phone}
+                    </span>
+                  </div>
                 </div>
                 <button
                   onClick={logout}

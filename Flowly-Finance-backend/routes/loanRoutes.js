@@ -11,6 +11,7 @@ import {
   applyLoan,
   getUserApplications,
   resubmitDocuments,
+  updateApplicationDocuments,
   acceptSanctionLetter,
   esignLoanAgreement,
   getAllApplications,
@@ -23,6 +24,7 @@ import {
   disburseLoan,
 } from "../controllers/loanController.js";
 import { protect, authorize } from "../middleware/authMiddleware.js";
+import { uploadLoanFiles, uploadLoanSupportingDoc } from "../middleware/uploadMiddleware.js";
 
 const router = express.Router();
 
@@ -37,9 +39,10 @@ router.delete("/products/:id", protect, authorize("worker", "admin"), deleteLoan
 router.post("/seed-products", protect, authorize("worker", "admin"), seedLoanProducts);
 
 // Customer loan endpoints
-router.post("/apply", protect, authorize("customer"), applyLoan);
+router.post("/apply", protect, authorize("customer"), uploadLoanFiles, applyLoan);
 router.get("/my-applications", protect, authorize("customer"), getUserApplications);
-router.post("/applications/:id/resubmit-documents", protect, authorize("customer"), resubmitDocuments);
+router.put("/applications/:id/documents", protect, authorize("customer"), uploadLoanFiles, updateApplicationDocuments);
+router.post("/applications/:id/resubmit-documents", protect, authorize("customer"), uploadLoanSupportingDoc, resubmitDocuments);
 router.post("/applications/:id/accept-sanction", protect, authorize("customer"), acceptSanctionLetter);
 router.post("/applications/:id/esign", protect, authorize("customer"), esignLoanAgreement);
 

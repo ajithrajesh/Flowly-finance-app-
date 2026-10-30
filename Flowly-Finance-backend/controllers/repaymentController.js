@@ -695,7 +695,9 @@ export async function markPaidManually(req, res) {
  */
 export async function getCollectionsOverview(req, res) {
   try {
-    const { status, search } = req.query;
+    const { status, search, sortBy = "nextDue" } = req.query;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
 
     const baseFilter = {
       $or: [
@@ -804,6 +806,29 @@ export async function getCollectionsOverview(req, res) {
       filteredList = enrichedLoans.filter((l) => l.status === "closed");
     }
 
+    // Sort prior to pagination so order is respected globally
+    if (sortBy === "overdue") {
+      filteredList.sort((a, b) => {
+        const aOverdue = (a.summary?.overdueCount || 0) + (a.overdueInstallments || 0);
+        const bOverdue = (b.summary?.overdueCount || 0) + (b.overdueInstallments || 0);
+        return bOverdue - aOverdue;
+      });
+    } else if (sortBy === "amount") {
+      filteredList.sort((a, b) => (b.principal || 0) - (a.principal || 0));
+    } else {
+      // "nextDue"
+      filteredList.sort((a, b) => {
+        const aDate = a.nextDueDate ? new Date(a.nextDueDate).getTime() : Infinity;
+        const bDate = b.nextDueDate ? new Date(b.nextDueDate).getTime() : Infinity;
+        return aDate - bDate;
+      });
+    }
+
+    const total = filteredList.length;
+    const totalPages = Math.ceil(total / limit) || 0;
+    const skip = (page - 1) * limit;
+    const paginatedLoans = filteredList.slice(skip, skip + limit);
+
     const collectionRate = (totalCollected + totalOverdueAmount) > 0
       ? Math.round((totalCollected / (totalCollected + totalOverdueAmount)) * 100)
       : 100;
@@ -821,8 +846,16 @@ export async function getCollectionsOverview(req, res) {
         totalOverdueAmount: round2(totalOverdueAmount),
         collectionRate,
       },
-      count: filteredList.length,
-      loans: filteredList,
+      count: paginatedLoans.length,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasPrevPage: page > 1,
+        hasNextPage: page < totalPages,
+      },
+      loans: paginatedLoans,
     });
   } catch (err) {
     console.error("getCollectionsOverview error:", err);
@@ -1051,14 +1084,39 @@ export async function getDigitalPaymentHistory(req, res) {
 
 export async function getOverdueLoans(req, res) {
   try {
-    const loans = await LoanApplication.find({
-      $or: [{ overdueInstallments: { $gt: 0 } }, { "repayments.status": "overdue" }],
-    })
-      .populate("user", "name email phone")
-      .populate("assignedTo", "name email")
-      .sort({ updatedAt: -1 });
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const skip = (page - 1) * limit;
 
-    return res.json({ count: loans.length, loans });
+    const filter = {
+      $or: [{ overdueInstallments: { $gt: 0 } }, { "repayments.status": "overdue" }],
+    };
+
+    const [loans, total] = await Promise.all([
+      LoanApplication.find(filter)
+        .populate("user", "name email phone")
+        .populate("assignedTo", "name email")
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      LoanApplication.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(total / limit) || 0;
+
+    return res.json({
+      count: loans.length,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasPrevPage: page > 1,
+        hasNextPage: page < totalPages,
+      },
+      loans,
+    });
   } catch (err) {
     return res.status(500).json({ message: "Failed to fetch overdue loans", error: err.message });
   }

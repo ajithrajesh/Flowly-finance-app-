@@ -112,7 +112,29 @@ export const compareWithSubmitted = ({ fields, idType, idNumber, dob, confidence
 // OCR engine
 // ---------------------------------------------------------------------------
 
+const isValidImageBuffer = (buf) => {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
+  // PNG: 89 50 4E 47
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return true;
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true;
+  // GIF: 47 49 46 38
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return true;
+  // BMP: 42 4D
+  if (buf[0] === 0x42 && buf[1] === 0x4D) return true;
+  // TIFF
+  if ((buf[0] === 0x49 && buf[1] === 0x49 && buf[2] === 0x2A && buf[3] === 0x00) ||
+      (buf[0] === 0x4D && buf[1] === 0x4D && buf[2] === 0x00 && buf[3] === 0x2A)) return true;
+  // WebP
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+  return false;
+};
+
 export const readTextFromImage = async (buffer) => {
+  if (process.env.NODE_ENV === "test" || !isValidImageBuffer(buffer)) {
+    return { text: "", confidence: 0 };
+  }
   const worker = await createWorker("eng", 1, {
     ...(langPath ? { langPath, gzip: true } : {}),
     cacheMethod: "none",
@@ -150,6 +172,8 @@ export const runKycOcrInBackground = ({ kycId, buffer, idType, idNumber, dob }) 
         ocr: { status: "failed", reason: err.message, processedAt: new Date() },
       }).catch(() => {});
     }
+  }).catch((err) => {
+    console.error(`OCR background queue error for KYC ${kycId}:`, err);
   });
   return queue;
 };

@@ -19,9 +19,10 @@ router.get("/analysis", authorize("admin", "worker"), getBusinessAnalysis);
 router.get("/workers", authorize("admin", "worker"), getWorkerMonitor);
 
 // POST /api/admin/workers — Admin creates a new staff/worker account
-router.post("/workers", authorize("admin", "worker"), createWorkerAccount);
+router.post("/workers", authorize("admin"), createWorkerAccount);
 
-// PATCH /api/admin/workers/:id/status — Admin updates worker status (active, blocked, inactive)
-router.patch("/workers/:id/status", authorize("admin", "worker"), updateWorkerStatus);
+// PATCH & PUT /api/admin/workers/:id/status — Admin updates worker status (active, blocked, inactive) or role
+router.patch("/workers/:id/status", authorize("admin"), updateWorkerStatus);
+router.put("/workers/:id/status", authorize("admin"), updateWorkerStatus);
 
 export default router;

@@ -1,13 +1,59 @@
+import path from "path";
 import mongoose from "mongoose";
 import LoanProduct from "../models/LoanProduct.js";
 import LoanApplication from "../models/LoanApplication.js";
 import User from "../models/User.js";
 import Account from "../models/Account.js";
+import KYC from "../models/KYC.js";
+import Document from "../models/Document.js";
 import Notification from "../models/Notification.js";
 import { notifyUser, notifyWorkers, notifyAdmins } from "../services/notificationService.js";
 import { generateScheduleOnDisbursal } from "./repaymentController.js";
 import { calculateEMI, round2 } from "../utils/emiCalculator.js";
 import { sendLoanSubmissionEmail, sendLoanSanctionEmail } from "../utils/mailer.js";
+import { uploadLoanFile } from "../services/cloudinaryService.js";
+
+const sanitizeDocUrl = (url) => {
+  if (!url || typeof url !== "string") return "";
+  const trimmed = url.trim();
+  if (
+    trimmed.startsWith("/uploads/sample_") ||
+    trimmed.includes("sample_") ||
+    trimmed.includes("example.test") ||
+    trimmed.includes("dummy") ||
+    trimmed.includes("via.placeholder") ||
+    trimmed === "/uploads/pan_card.pdf" ||
+    trimmed === "/uploads/aadhaar_card.pdf" ||
+    trimmed === "/uploads/salary_slip.pdf" ||
+    trimmed === "/uploads/bank_statement.pdf" ||
+    trimmed === "/uploads/additional_doc.pdf"
+  ) {
+    return "";
+  }
+  return trimmed;
+};
+
+/**
+ * Maps a human-readable scheme requirement or document title to a valid Document documentType enum.
+ */
+export const determineLoanDocType = (name = "") => {
+  const lower = String(name).toLowerCase();
+  if (lower.includes("pan")) return "pan";
+  if (lower.includes("aadhaar") || lower.includes("national id") || lower.includes("uidai")) return "aadhaar";
+  if (lower.includes("passport")) return "passport";
+  if (lower.includes("voter")) return "voter_id";
+  if (lower.includes("selfie") || lower.includes("photo") || lower.includes("photograph")) return "selfie";
+  if (lower.includes("salary") || lower.includes("pay slip") || lower.includes("payslip") || lower.includes("income proof") || lower.includes("income")) return "salary_slip";
+  if (lower.includes("bank statement") || lower.includes("account statement") || lower.includes("bank account")) return "bank_statement";
+  if (lower.includes("itr") || lower.includes("tax return") || lower.includes("form 16") || lower.includes("balance sheet")) return "tax_return";
+  if (lower.includes("gst") || lower.includes("business") || lower.includes("msme") || lower.includes("udyam") || lower.includes("trade license") || lower.includes("partnership") || lower.includes("shop")) return "business_proof";
+  if (lower.includes("vehicle") || lower.includes("quotation") || lower.includes("proforma") || lower.includes("invoice") || lower.includes("dealer")) return "vehicle_quotation";
+  if (lower.includes("admission") || lower.includes("offer letter") || lower.includes("fee") || lower.includes("marksheet") || lower.includes("degree") || lower.includes("exam") || lower.includes("transcript") || lower.includes("academic")) return "admission_letter";
+  if (lower.includes("address") || lower.includes("rent") || lower.includes("electricity") || lower.includes("utility") || lower.includes("bill") || lower.includes("deed") || lower.includes("domicile")) return "address_proof";
+  if (lower.includes("driving license") || lower.includes("driving")) return "identity_proof";
+  if (lower.includes("id card") || lower.includes("identity") || lower.includes("badge")) return "identity_proof";
+  return "loan_document";
+};
 
 export const getLoanProducts = async (req, res) => {
   try {
@@ -324,6 +370,17 @@ export const seedLoanProducts = async (req, res) => {
  */
 export const applyLoan = async (req, res) => {
   try {
+    const parseField = (val) => {
+      if (typeof val === "string") {
+        try {
+          return JSON.parse(val);
+        } catch {
+          return val;
+        }
+      }
+      return val;
+    };
+
     const {
       productId,
       productName,
@@ -334,11 +391,12 @@ export const applyLoan = async (req, res) => {
       tenure: bodyTenure,
       interestType: bodyInterestType,
       purpose,
-      personalInformation,
-      employmentDetails,
-      incomeDetails,
-      documents,
     } = req.body;
+
+    const personalInformation = parseField(req.body.personalInformation) || {};
+    const employmentDetails = parseField(req.body.employmentDetails) || {};
+    const incomeDetails = parseField(req.body.incomeDetails) || {};
+    const documents = parseField(req.body.documents) || {};
 
     const amount = Number(requestedAmount || bodyAmount);
     const months = Number(tenureMonths || bodyTenure);
@@ -378,6 +436,16 @@ export const applyLoan = async (req, res) => {
         selectedProductName = loanProduct.productName;
         selectedLoanType = loanProduct.loanType || "Personal";
         productInterestType = loanProduct.interestType || "diminishing";
+      }
+    }
+
+    if (!loanProduct && selectedLoanType) {
+      loanProduct = (await LoanProduct.findOne({ loanType: selectedLoanType, isActive: true }).catch(() => null)) ||
+                    (await LoanProduct.findOne({ loanType: selectedLoanType }).catch(() => null));
+      if (loanProduct) {
+        if (!productName) selectedProductName = loanProduct.productName;
+        interestRate = loanProduct.interestRate || interestRate;
+        productInterestType = loanProduct.interestType || productInterestType;
       }
     }
 
@@ -444,6 +512,284 @@ export const applyLoan = async (req, res) => {
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const applicationNumber = `LN-${dateStr}-${randomSuffix}`;
 
+    // Document processing: upload customer files or map from verified KYC
+    const allFilesList = Array.isArray(req.files)
+      ? req.files
+      : (req.files && typeof req.files === "object"
+          ? Object.entries(req.files).flatMap(([fieldname, files]) =>
+              (Array.isArray(files) ? files : [files]).map((f) => ({ ...f, fieldname: f.fieldname || fieldname }))
+            )
+          : []);
+
+    const filesByField = req.filesByField || {};
+    for (const f of allFilesList) {
+      if (f && f.fieldname && !filesByField[f.fieldname]) {
+        filesByField[f.fieldname] = [f];
+      }
+    }
+
+    const kyc = await KYC.findOne({ user: user._id });
+
+    let panCardUrl = sanitizeDocUrl(documents?.panCardUrl);
+    let panCardFileName = "";
+    let aadhaarCardUrl = sanitizeDocUrl(documents?.aadhaarCardUrl);
+    let aadhaarCardFileName = "";
+    let salarySlipUrl = sanitizeDocUrl(documents?.salarySlipUrl);
+    let salarySlipFileName = "";
+    let bankStatementUrl = sanitizeDocUrl(documents?.bankStatementUrl);
+    let bankStatementFileName = "";
+
+    // Scheme required documents definition from loan product (exclude disabled)
+    const schemeReqDocs = (Array.isArray(loanProduct?.requiredDocuments) ? loanProduct.requiredDocuments : [])
+      .filter((doc) => !doc.disabled && doc.isActive !== false);
+
+    // Build base specificDocs array aligning with scheme requirements
+    let specificDocs = (Array.isArray(documents?.specificDocs) ? [...documents.specificDocs] : [])
+      .filter((d) => !d.disabled && d.status !== "disabled")
+      .map((d) => ({
+        ...d,
+        name: d?.name || "",
+        fileName: d?.fileName || "",
+        docUrl: sanitizeDocUrl(d?.docUrl),
+        status: d?.docUrl ? "uploaded" : (d?.status || "pending"),
+      }));
+
+    // Ensure all defined scheme requirements are represented in specificDocs
+    if (schemeReqDocs.length > 0) {
+      schemeReqDocs.forEach((reqDoc, idx) => {
+        const originalIdx = Array.isArray(loanProduct?.requiredDocuments)
+          ? loanProduct.requiredDocuments.findIndex((r) => r.name === reqDoc.name)
+          : idx;
+        const schemeIdx = originalIdx >= 0 ? originalIdx : idx;
+
+        const found = specificDocs.find(
+          (d) => d.name === reqDoc.name || (d.schemeIndex !== undefined && (d.schemeIndex === schemeIdx || d.schemeIndex === idx))
+        );
+        if (!found) {
+          specificDocs.push({
+            schemeIndex: schemeIdx,
+            name: reqDoc.name,
+            description: reqDoc.description || "",
+            isMandatory: Boolean(reqDoc.isMandatory),
+            fileName: "",
+            docUrl: "",
+            status: "pending",
+            uploadedAt: null,
+          });
+        } else {
+          found.name = reqDoc.name;
+          found.schemeIndex = schemeIdx;
+          if (reqDoc.isMandatory !== undefined) found.isMandatory = reqDoc.isMandatory;
+          if (reqDoc.description && !found.description) found.description = reqDoc.description;
+        }
+      });
+
+      // Filter out mismatched or disabled document entries that don't belong to active scheme requirements and have no uploaded file
+      specificDocs = specificDocs.filter((d) => {
+        if (d.disabled || d.status === "disabled") return false;
+        if (!d.docUrl && (d.name?.startsWith("Document ") || !d.name)) return false;
+        const matchesDisabled = Array.isArray(loanProduct?.requiredDocuments) &&
+          loanProduct.requiredDocuments.some((req) => (req.disabled || req.isActive === false) && req.name === d.name);
+        if (matchesDisabled && !d.docUrl) return false;
+
+        const matchesScheme = schemeReqDocs.some(
+          (req) => req.name === d.name || (d.schemeIndex !== undefined && d.schemeIndex === req.schemeIndex)
+        );
+        return matchesScheme || Boolean(d.docUrl || d.fileName);
+      });
+    }
+
+    const panFile = filesByField.panCard?.[0] || filesByField.pan?.[0];
+    const aadhaarFile = filesByField.aadhaarCard?.[0] || filesByField.aadhaar?.[0];
+    const salaryFile = filesByField.salarySlip?.[0] || filesByField.salary?.[0];
+    const bankFile = filesByField.bankStatement?.[0] || filesByField.bank?.[0];
+    const additionalFile = filesByField.additionalDoc?.[0] || filesByField.additional?.[0];
+
+    if (panFile) {
+      const up = await uploadLoanFile(panFile.buffer, {
+        userId: String(user._id),
+        kind: "loan-pan",
+        originalName: panFile.originalname,
+        mimeType: panFile.mimetype,
+      });
+      panCardUrl = up.url;
+      panCardFileName = panFile.originalname;
+      await Document.create({
+        user: user._id,
+        documentType: "pan",
+        fileUrl: up.url,
+        publicId: up.publicId,
+        storageProvider: up.storageProvider || "cloudinary",
+        verificationStatus: "pending",
+      }).catch(() => {});
+    } else if (!panCardUrl && kyc) {
+      panCardUrl = sanitizeDocUrl(kyc.panUrl) || (kyc.idType === "pan" ? sanitizeDocUrl(kyc.documentUrl) : "") || "";
+      if (panCardUrl) panCardFileName = panCardUrl.split("/").pop().split("?")[0] || "pan_card.pdf";
+    }
+
+    if (aadhaarFile) {
+      const up = await uploadLoanFile(aadhaarFile.buffer, {
+        userId: String(user._id),
+        kind: "loan-aadhaar",
+        originalName: aadhaarFile.originalname,
+        mimeType: aadhaarFile.mimetype,
+      });
+      aadhaarCardUrl = up.url;
+      aadhaarCardFileName = aadhaarFile.originalname;
+      await Document.create({
+        user: user._id,
+        documentType: "aadhaar",
+        fileUrl: up.url,
+        publicId: up.publicId,
+        storageProvider: up.storageProvider || "cloudinary",
+        verificationStatus: "pending",
+      }).catch(() => {});
+    } else if (!aadhaarCardUrl && kyc) {
+      aadhaarCardUrl = sanitizeDocUrl(kyc.aadhaarUrl) || (kyc.idType === "aadhaar" ? sanitizeDocUrl(kyc.documentUrl) : "") || "";
+      if (aadhaarCardUrl) aadhaarCardFileName = aadhaarCardUrl.split("/").pop().split("?")[0] || "aadhaar_card.pdf";
+    }
+
+    if (salaryFile) {
+      const up = await uploadLoanFile(salaryFile.buffer, {
+        userId: String(user._id),
+        kind: "loan-salary",
+        originalName: salaryFile.originalname,
+        mimeType: salaryFile.mimetype,
+      });
+      salarySlipUrl = up.url;
+      salarySlipFileName = salaryFile.originalname;
+      await Document.create({
+        user: user._id,
+        documentType: "salary_slip",
+        fileUrl: up.url,
+        publicId: up.publicId,
+        storageProvider: up.storageProvider || "cloudinary",
+        verificationStatus: "pending",
+      }).catch(() => {});
+    }
+
+    if (bankFile) {
+      const up = await uploadLoanFile(bankFile.buffer, {
+        userId: String(user._id),
+        kind: "loan-bank-statement",
+        originalName: bankFile.originalname,
+        mimeType: bankFile.mimetype,
+      });
+      bankStatementUrl = up.url;
+      bankStatementFileName = bankFile.originalname;
+      await Document.create({
+        user: user._id,
+        documentType: "bank_statement",
+        fileUrl: up.url,
+        publicId: up.publicId,
+        storageProvider: up.storageProvider || "cloudinary",
+        verificationStatus: "pending",
+      }).catch(() => {});
+    }
+
+    let initialAdditionalDocs = [];
+    if (additionalFile) {
+      const up = await uploadLoanFile(additionalFile.buffer, {
+        userId: String(user._id),
+        kind: "loan-additional",
+        originalName: additionalFile.originalname,
+        mimeType: additionalFile.mimetype,
+      });
+      const docType = determineLoanDocType(additionalFile.originalname);
+      await Document.create({
+        user: user._id,
+        documentType: docType,
+        fileUrl: up.url,
+        publicId: up.publicId,
+        storageProvider: up.storageProvider || "cloudinary",
+        verificationStatus: "pending",
+      }).catch(() => {});
+      initialAdditionalDocs.push({
+        title: additionalFile.originalname.replace(/\.[^/.]+$/, "") || "Additional Document",
+        docUrl: up.url,
+        fileName: additionalFile.originalname,
+        status: "uploaded",
+        uploadedAt: new Date(),
+      });
+    }
+
+    // Process any scheme-specific uploaded files
+    for (const f of allFilesList) {
+      if (f && f.fieldname && f.fieldname.startsWith("specificDoc_")) {
+        const idx = parseInt(f.fieldname.replace("specificDoc_", ""), 10);
+        const docNameFromBody = req.body[`specificDocName_${idx}`] || req.body[`name_${idx}`];
+        const originalReq = loanProduct?.requiredDocuments?.[idx];
+        const targetReq = (originalReq && !originalReq.disabled && originalReq.isActive !== false)
+          ? originalReq
+          : schemeReqDocs[idx];
+        const targetName = docNameFromBody || targetReq?.name || specificDocs[idx]?.name || specificDocs.find((d) => d.schemeIndex === idx)?.name || `Document ${idx + 1}`;
+
+        const up = await uploadLoanFile(f.buffer, {
+          userId: String(user._id),
+          kind: `loan-specific-${idx}`,
+          originalName: f.originalname,
+          mimeType: f.mimetype,
+        });
+
+        let matchedDoc = specificDocs.find(
+          (d, i) => (docNameFromBody && d.name === docNameFromBody) ||
+                    (targetName && d.name === targetName) ||
+                    (d.schemeIndex !== undefined && d.schemeIndex === idx) ||
+                    i === idx
+        );
+        if (matchedDoc) {
+          matchedDoc.name = matchedDoc.name || targetName;
+          matchedDoc.schemeIndex = idx;
+          matchedDoc.docUrl = up.url;
+          matchedDoc.fileName = f.originalname;
+          matchedDoc.status = "uploaded";
+          matchedDoc.uploadedAt = new Date();
+        } else {
+          matchedDoc = {
+            schemeIndex: idx,
+            name: targetName,
+            description: targetReq?.description || "",
+            isMandatory: Boolean(targetReq?.isMandatory),
+            fileName: f.originalname,
+            docUrl: up.url,
+            status: "uploaded",
+            uploadedAt: new Date(),
+          };
+          specificDocs.push(matchedDoc);
+        }
+
+          // Save in Document collection with semantic documentType
+          const docType = determineLoanDocType(matchedDoc.name);
+          await Document.create({
+            user: user._id,
+            documentType: docType,
+            fileUrl: up.url,
+            publicId: up.publicId,
+            storageProvider: up.storageProvider || "cloudinary",
+            verificationStatus: "pending",
+          }).catch((err) => console.error("Error creating Document for scheme doc:", err.message));
+
+          // Auto-sync into standard proof slots if not already populated
+          const lowerName = matchedDoc.name.toLowerCase();
+          if (!salarySlipUrl && (lowerName.includes("salary") || lowerName.includes("pay slip"))) {
+            salarySlipUrl = up.url;
+            salarySlipFileName = f.originalname;
+          }
+          if (!bankStatementUrl && (lowerName.includes("bank statement") || lowerName.includes("account statement"))) {
+            bankStatementUrl = up.url;
+            bankStatementFileName = f.originalname;
+          }
+          if (!panCardUrl && lowerName.includes("pan")) {
+            panCardUrl = up.url;
+            panCardFileName = f.originalname;
+          }
+          if (!aadhaarCardUrl && lowerName.includes("aadhaar")) {
+            aadhaarCardUrl = up.url;
+            aadhaarCardFileName = f.originalname;
+          }
+        }
+      }
+
     const application = await LoanApplication.create({
       applicationNumber,
       user: req.user._id,
@@ -499,12 +845,16 @@ export const applyLoan = async (req, res) => {
       },
 
       documents: {
-        panCardUrl: documents?.panCardUrl || "/uploads/sample_pan.pdf",
-        aadhaarCardUrl: documents?.aadhaarCardUrl || "/uploads/sample_aadhaar.pdf",
-        salarySlipUrl: documents?.salarySlipUrl || "/uploads/sample_salary.pdf",
-        bankStatementUrl: documents?.bankStatementUrl || "/uploads/sample_statement.pdf",
-        specificDocs: Array.isArray(documents?.specificDocs) ? documents.specificDocs : [],
-        additionalDocs: [],
+        panCardUrl: panCardUrl || "",
+        panCardFileName: panCardFileName || "",
+        aadhaarCardUrl: aadhaarCardUrl || "",
+        aadhaarCardFileName: aadhaarCardFileName || "",
+        salarySlipUrl: salarySlipUrl || "",
+        salarySlipFileName: salarySlipFileName || "",
+        bankStatementUrl: bankStatementUrl || "",
+        bankStatementFileName: bankStatementFileName || "",
+        specificDocs: specificDocs || [],
+        additionalDocs: initialAdditionalDocs || [],
       },
 
       ocrVerification,
@@ -560,10 +910,22 @@ export const applyLoan = async (req, res) => {
 
 export const getUserApplications = async (req, res) => {
   try {
-    const applications = await LoanApplication.find({ user: req.user._id })
+    const rawApplications = await LoanApplication.find({ user: req.user._id })
       .populate("product")
       .populate("account")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const applications = await Promise.all(
+      rawApplications.map(async (app) => {
+        if (!app.product && app.loanType) {
+          app.product = await LoanProduct.findOne({ loanType: app.loanType, isActive: true })
+            .select("productName loanType requiredDocuments interestRate")
+            .lean();
+        }
+        return app;
+      })
+    );
 
     return res.status(200).json({ applications });
   } catch (error) {
@@ -591,14 +953,77 @@ export const resubmitDocuments = async (req, res) => {
       return res.status(400).json({ message: `Cannot upload documents when status is '${application.status}'` });
     }
 
-    // Add to additional docs list
-    application.documents.additionalDocs.push({
-      title: docTitle || "Requested Document",
-      docUrl: docUrl || "/uploads/additional_doc.pdf",
-      status: "uploaded",
-      requestedNote: application.workerReview?.requestedDocNote || "",
-      uploadedAt: new Date(),
-    });
+    let finalUrl = "";
+    let originalName = "";
+    const uploadFileObj = req.file || (Array.isArray(req.files) ? req.files[0] : null);
+
+    if (uploadFileObj) {
+      originalName = uploadFileObj.originalname;
+      const up = await uploadLoanFile(uploadFileObj.buffer, {
+        userId: String(req.user._id),
+        kind: "additional-doc",
+        originalName: uploadFileObj.originalname,
+        mimeType: uploadFileObj.mimetype,
+      });
+      finalUrl = up.url;
+    } else if (docUrl && typeof docUrl === "string") {
+      finalUrl = sanitizeDocUrl(docUrl);
+      originalName = finalUrl.split("/").pop() || "document.pdf";
+    }
+
+    if (!finalUrl) {
+      return res.status(400).json({ message: "Please provide a valid document file to upload" });
+    }
+
+    const cleanTitle = (docTitle || "Requested Document").trim();
+    const docType = determineLoanDocType(cleanTitle);
+
+    await Document.create({
+      user: req.user._id,
+      documentType: docType,
+      fileUrl: finalUrl,
+      publicId: finalUrl.includes("/uploads/") ? path.basename(finalUrl) : undefined,
+      storageProvider: finalUrl.startsWith("http") ? "cloudinary" : "local",
+      verificationStatus: "pending",
+    }).catch(() => {});
+
+    if (!application.documents) application.documents = {};
+    if (!application.documents.additionalDocs) application.documents.additionalDocs = [];
+
+    // Deduplicate: check if an existing requested item matches or is pending
+    const existingIndex = application.documents.additionalDocs.findIndex(
+      (item) =>
+        item.status === "requested" &&
+        (!docTitle ||
+          item.title?.toLowerCase() === cleanTitle.toLowerCase() ||
+          item.requestedNote?.toLowerCase().includes(cleanTitle.toLowerCase()))
+    );
+
+    if (existingIndex !== -1) {
+      application.documents.additionalDocs[existingIndex].title = cleanTitle;
+      application.documents.additionalDocs[existingIndex].docUrl = finalUrl;
+      application.documents.additionalDocs[existingIndex].fileName = originalName;
+      application.documents.additionalDocs[existingIndex].status = "uploaded";
+      application.documents.additionalDocs[existingIndex].uploadedAt = new Date();
+    } else {
+      const anyRequestedIdx = application.documents.additionalDocs.findIndex((item) => item.status === "requested");
+      if (anyRequestedIdx !== -1) {
+        application.documents.additionalDocs[anyRequestedIdx].title = cleanTitle;
+        application.documents.additionalDocs[anyRequestedIdx].docUrl = finalUrl;
+        application.documents.additionalDocs[anyRequestedIdx].fileName = originalName;
+        application.documents.additionalDocs[anyRequestedIdx].status = "uploaded";
+        application.documents.additionalDocs[anyRequestedIdx].uploadedAt = new Date();
+      } else {
+        application.documents.additionalDocs.push({
+          title: cleanTitle,
+          docUrl: finalUrl,
+          fileName: originalName,
+          status: "uploaded",
+          requestedNote: application.workerReview?.requestedDocNote || "",
+          uploadedAt: new Date(),
+        });
+      }
+    }
 
     // Update application status back to under_worker_review for re-review
     application.status = "under_worker_review";
@@ -624,6 +1049,257 @@ export const resubmitDocuments = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to upload document", error: error.message });
+  }
+};
+
+/**
+ * Customer updates or replaces submitted documents for a loan application.
+ * Allowed when status is 'submitted', 'under_worker_review', or 'documents_requested'.
+ */
+export const updateApplicationDocuments = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const application = await LoanApplication.findOne({ _id: id, user: req.user._id });
+    if (!application) {
+      return res.status(404).json({ message: "Loan application not found" });
+    }
+
+    const editableStatuses = ["submitted", "under_worker_review", "documents_requested"];
+    if (!editableStatuses.includes(application.status)) {
+      return res.status(400).json({
+        message: `Documents cannot be modified when application status is '${application.status}'`,
+      });
+    }
+
+    const allFilesList = Array.isArray(req.files)
+      ? req.files
+      : (req.files && typeof req.files === "object"
+          ? Object.entries(req.files).flatMap(([fieldname, files]) =>
+              (Array.isArray(files) ? files : [files]).map((f) => ({ ...f, fieldname: f.fieldname || fieldname }))
+            )
+          : req.file ? [req.file] : []);
+
+    const filesByField = req.filesByField || {};
+    for (const f of allFilesList) {
+      if (f && f.fieldname && !filesByField[f.fieldname]) {
+        filesByField[f.fieldname] = [f];
+      }
+    }
+
+    if (!application.documents) application.documents = {};
+    if (!Array.isArray(application.documents.specificDocs)) application.documents.specificDocs = [];
+    if (!Array.isArray(application.documents.additionalDocs)) application.documents.additionalDocs = [];
+
+    let updatedCount = 0;
+    const updatedDocNames = [];
+
+    // 1. Standard docs
+    const panFile = filesByField.panCard?.[0] || filesByField.pan?.[0];
+    const aadhaarFile = filesByField.aadhaarCard?.[0] || filesByField.aadhaar?.[0];
+    const salaryFile = filesByField.salarySlip?.[0] || filesByField.salary?.[0];
+    const bankFile = filesByField.bankStatement?.[0] || filesByField.bank?.[0];
+    const additionalFile = filesByField.additionalDoc?.[0] || filesByField.additional?.[0];
+
+    if (panFile) {
+      const up = await uploadLoanFile(panFile.buffer, {
+        userId: String(req.user._id),
+        kind: "loan-pan",
+        originalName: panFile.originalname,
+        mimeType: panFile.mimetype,
+      });
+      application.documents.panCardUrl = up.url;
+      application.documents.panCardFileName = panFile.originalname;
+      updatedCount++;
+      updatedDocNames.push("PAN Card");
+    }
+
+    if (aadhaarFile) {
+      const up = await uploadLoanFile(aadhaarFile.buffer, {
+        userId: String(req.user._id),
+        kind: "loan-aadhaar",
+        originalName: aadhaarFile.originalname,
+        mimeType: aadhaarFile.mimetype,
+      });
+      application.documents.aadhaarCardUrl = up.url;
+      application.documents.aadhaarCardFileName = aadhaarFile.originalname;
+      updatedCount++;
+      updatedDocNames.push("Aadhaar Card");
+    }
+
+    if (salaryFile) {
+      const up = await uploadLoanFile(salaryFile.buffer, {
+        userId: String(req.user._id),
+        kind: "loan-salary",
+        originalName: salaryFile.originalname,
+        mimeType: salaryFile.mimetype,
+      });
+      application.documents.salarySlipUrl = up.url;
+      application.documents.salarySlipFileName = salaryFile.originalname;
+      updatedCount++;
+      updatedDocNames.push("Salary Slip");
+    }
+
+    if (bankFile) {
+      const up = await uploadLoanFile(bankFile.buffer, {
+        userId: String(req.user._id),
+        kind: "loan-bank-statement",
+        originalName: bankFile.originalname,
+        mimeType: bankFile.mimetype,
+      });
+      application.documents.bankStatementUrl = up.url;
+      application.documents.bankStatementFileName = bankFile.originalname;
+      updatedCount++;
+      updatedDocNames.push("Bank Statement");
+    }
+
+    if (additionalFile) {
+      const docTitle = req.body.docTitle || req.body.additionalDocTitle || "Additional Supporting Document";
+      const up = await uploadLoanFile(additionalFile.buffer, {
+        userId: String(req.user._id),
+        kind: "loan-additional",
+        originalName: additionalFile.originalname,
+        mimeType: additionalFile.mimetype,
+      });
+      const existingIdx = application.documents.additionalDocs.findIndex(
+        (a) => a.title?.toLowerCase() === docTitle.toLowerCase() || a.status === "requested"
+      );
+      if (existingIdx !== -1) {
+        application.documents.additionalDocs[existingIdx].docUrl = up.url;
+        application.documents.additionalDocs[existingIdx].fileName = additionalFile.originalname;
+        application.documents.additionalDocs[existingIdx].title = docTitle;
+        application.documents.additionalDocs[existingIdx].status = "uploaded";
+        application.documents.additionalDocs[existingIdx].uploadedAt = new Date();
+      } else {
+        application.documents.additionalDocs.push({
+          title: docTitle,
+          docUrl: up.url,
+          fileName: additionalFile.originalname,
+          status: "uploaded",
+          uploadedAt: new Date(),
+        });
+      }
+      updatedCount++;
+      updatedDocNames.push(docTitle);
+    }
+
+    // 2. Specific doc replacement by name or index
+    const targetDocName = req.body.targetDocName || req.body.docName;
+    const targetDocIndex = req.body.targetDocIndex !== undefined ? parseInt(req.body.targetDocIndex, 10) : undefined;
+    const genericUploadFile = filesByField.file?.[0] || filesByField.document?.[0];
+
+    if (genericUploadFile && (targetDocName || targetDocIndex !== undefined)) {
+      const up = await uploadLoanFile(genericUploadFile.buffer, {
+        userId: String(req.user._id),
+        kind: `loan-doc-${targetDocIndex ?? 0}`,
+        originalName: genericUploadFile.originalname,
+        mimeType: genericUploadFile.mimetype,
+      });
+
+      const lowerTarget = (targetDocName || "").toLowerCase();
+      if (lowerTarget.includes("pan card") || lowerTarget === "pan") {
+        application.documents.panCardUrl = up.url;
+        application.documents.panCardFileName = genericUploadFile.originalname;
+      } else if (lowerTarget.includes("aadhaar")) {
+        application.documents.aadhaarCardUrl = up.url;
+        application.documents.aadhaarCardFileName = genericUploadFile.originalname;
+      } else if (lowerTarget.includes("salary") || lowerTarget.includes("pay slip")) {
+        application.documents.salarySlipUrl = up.url;
+        application.documents.salarySlipFileName = genericUploadFile.originalname;
+      } else if (lowerTarget.includes("bank statement")) {
+        application.documents.bankStatementUrl = up.url;
+        application.documents.bankStatementFileName = genericUploadFile.originalname;
+      }
+
+      let matched = application.documents.specificDocs.find(
+        (d, i) => (targetDocName && d.name === targetDocName) || (targetDocIndex !== undefined && (d.schemeIndex === targetDocIndex || i === targetDocIndex))
+      );
+      if (matched) {
+        matched.docUrl = up.url;
+        matched.fileName = genericUploadFile.originalname;
+        matched.status = "uploaded";
+        matched.uploadedAt = new Date();
+      } else if (targetDocName) {
+        application.documents.specificDocs.push({
+          schemeIndex: targetDocIndex ?? application.documents.specificDocs.length,
+          name: targetDocName,
+          docUrl: up.url,
+          fileName: genericUploadFile.originalname,
+          status: "uploaded",
+          uploadedAt: new Date(),
+        });
+      }
+      updatedCount++;
+      updatedDocNames.push(targetDocName || genericUploadFile.originalname);
+    }
+
+    // 3. Any specificDoc_N files
+    for (const f of allFilesList) {
+      if (f && f.fieldname && f.fieldname.startsWith("specificDoc_")) {
+        const idx = parseInt(f.fieldname.replace("specificDoc_", ""), 10);
+        const docNameFromBody = req.body[`specificDocName_${idx}`] || req.body[`name_${idx}`];
+        const up = await uploadLoanFile(f.buffer, {
+          userId: String(req.user._id),
+          kind: `loan-specific-${idx}`,
+          originalName: f.originalname,
+          mimeType: f.mimetype,
+        });
+
+        let matched = application.documents.specificDocs.find(
+          (d, i) => (docNameFromBody && d.name === docNameFromBody) || d.schemeIndex === idx || i === idx
+        );
+        if (matched) {
+          matched.docUrl = up.url;
+          matched.fileName = f.originalname;
+          matched.status = "uploaded";
+          matched.uploadedAt = new Date();
+          if (docNameFromBody) matched.name = docNameFromBody;
+        } else {
+          application.documents.specificDocs.push({
+            schemeIndex: idx,
+            name: docNameFromBody || `Document ${idx + 1}`,
+            docUrl: up.url,
+            fileName: f.originalname,
+            status: "uploaded",
+            uploadedAt: new Date(),
+          });
+        }
+        updatedCount++;
+        updatedDocNames.push(docNameFromBody || f.originalname);
+      }
+    }
+
+    if (updatedCount === 0) {
+      return res.status(400).json({ message: "No document files were received. Please select a valid file to upload." });
+    }
+
+    if (application.status === "documents_requested") {
+      application.status = "under_worker_review";
+    }
+
+    application.markModified("documents");
+    await application.save();
+
+    await notifyWorkers({
+      type: "loan",
+      title: "Loan Documents Updated",
+      message: `Customer updated ${updatedCount} document(s) (${updatedDocNames.join(", ")}) for application ${application.applicationNumber}.`,
+      meta: { loanId: application._id, applicationNumber: application.applicationNumber },
+    });
+
+    await notifyUser(req.user._id, {
+      type: "loan",
+      title: "Documents Updated Successfully",
+      message: `Your updated documents (${updatedDocNames.join(", ")}) were saved for application ${application.applicationNumber}.`,
+      meta: { loanId: application._id, applicationNumber: application.applicationNumber },
+    });
+
+    return res.status(200).json({
+      message: `Successfully updated ${updatedCount} document(s).`,
+      application,
+    });
+  } catch (error) {
+    console.error("updateApplicationDocuments error:", error);
+    return res.status(500).json({ message: "Failed to update documents", error: error.message });
   }
 };
 
@@ -744,34 +1420,71 @@ export const esignLoanAgreement = async (req, res) => {
 export const getAllApplications = async (req, res) => {
   try {
     const { status, search } = req.query;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const skip = (page - 1) * limit;
+
     const filter = {};
 
-    if (status) {
+    if (status && status !== "all") {
       filter.status = status;
     }
 
-    let query = LoanApplication.find(filter)
-      .populate("user", "name email phone kycStatus")
-      .populate("assignedTo", "name email")
-      .sort({ createdAt: -1 });
-
-    const applications = await query;
-
-    let filtered = applications;
     if (search) {
-      const term = search.toLowerCase();
-      filtered = applications.filter(
-        (app) =>
-          app.applicationNumber?.toLowerCase().includes(term) ||
-          app.user?.name?.toLowerCase().includes(term) ||
-          app.productName?.toLowerCase().includes(term) ||
-          app.status?.toLowerCase().includes(term)
-      );
+      const safe = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(safe, "i");
+      const matchingUsers = await User.find({
+        $or: [{ name: regex }, { email: regex }, { phone: regex }],
+      }).select("_id").lean();
+      const userIds = matchingUsers.map((u) => u._id);
+
+      filter.$or = [
+        { applicationNumber: regex },
+        { productName: regex },
+        { loanType: regex },
+        { "personalInformation.fullName": regex },
+        { "personalInformation.email": regex },
+        { "personalInformation.phone": regex },
+        { user: { $in: userIds } },
+      ];
     }
 
+    const [rawApplications, total] = await Promise.all([
+      LoanApplication.find(filter)
+        .populate("user", "name email phone kycStatus")
+        .populate("assignedTo", "name email")
+        .populate("product", "productName loanType requiredDocuments interestRate")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      LoanApplication.countDocuments(filter),
+    ]);
+
+    const applications = await Promise.all(
+      rawApplications.map(async (app) => {
+        if (!app.product && app.loanType) {
+          app.product = await LoanProduct.findOne({ loanType: app.loanType, isActive: true })
+            .select("productName loanType requiredDocuments interestRate")
+            .lean();
+        }
+        return app;
+      })
+    );
+
+    const totalPages = Math.ceil(total / limit) || 0;
+
     return res.status(200).json({
-      count: filtered.length,
-      applications: filtered,
+      count: applications.length,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasPrevPage: page > 1,
+        hasNextPage: page < totalPages,
+      },
+      applications,
     });
   } catch (error) {
     return res.status(500).json({
@@ -787,10 +1500,19 @@ export const getApplicationById = async (req, res) => {
     const application = await LoanApplication.findById(id)
       .populate("user", "name email phone kycStatus address dob")
       .populate("assignedTo", "name email")
+      .populate("product", "productName loanType requiredDocuments interestRate")
       .populate("account");
 
     if (!application) {
       return res.status(404).json({ message: "Loan application not found" });
+    }
+
+    if (!application.product && application.loanType) {
+      const fallbackProd = await LoanProduct.findOne({ loanType: application.loanType, isActive: true })
+        .select("productName loanType requiredDocuments interestRate");
+      if (fallbackProd) {
+        application.product = fallbackProd;
+      }
     }
 
     return res.status(200).json({ application });

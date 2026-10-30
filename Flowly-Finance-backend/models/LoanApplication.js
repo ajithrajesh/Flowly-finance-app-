@@ -38,6 +38,7 @@ const additionalDocSchema = new Schema(
   {
     title: { type: String, required: true },
     docUrl: { type: String },
+    fileName: { type: String, default: "" },
     status: { type: String, enum: ["requested", "uploaded", "verified", "rejected"], default: "requested" },
     requestedNote: { type: String, default: "" },
     uploadedAt: { type: Date, default: null },
@@ -119,15 +120,22 @@ const loanApplicationSchema = new Schema(
     // Step 5 & OCR: Documents & Verification
     documents: {
       panCardUrl: { type: String, default: "" },
+      panCardFileName: { type: String, default: "" },
       aadhaarCardUrl: { type: String, default: "" },
+      aadhaarCardFileName: { type: String, default: "" },
       salarySlipUrl: { type: String, default: "" },
+      salarySlipFileName: { type: String, default: "" },
       bankStatementUrl: { type: String, default: "" },
+      bankStatementFileName: { type: String, default: "" },
       specificDocs: [
         {
+          schemeIndex: { type: Number },
           name: { type: String, required: true },
+          description: { type: String, default: "" },
+          isMandatory: { type: Boolean, default: true },
           docUrl: { type: String, default: "" },
           fileName: { type: String, default: "" },
-          status: { type: String, enum: ["uploaded", "verified", "rejected", "pending"], default: "uploaded" },
+          status: { type: String, enum: ["uploaded", "verified", "rejected", "pending", "disabled"], default: "uploaded" },
           uploadedAt: { type: Date, default: Date.now },
         },
       ],

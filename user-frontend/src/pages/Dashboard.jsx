@@ -21,7 +21,9 @@ import {
   X, 
   Printer, 
   Download, 
-  ArrowLeftRight
+  ArrowLeftRight,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 
 const Dashboard = () => {
@@ -32,6 +34,19 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [mpinModalOpen, setMpinModalOpen] = useState(false);
+
+  // Recent Account Ledger Pagination State
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [ledgerLimit, setLedgerLimit] = useState(5);
+  const [ledgerPagination, setLedgerPagination] = useState({
+    total: 0,
+    page: 1,
+    limit: 5,
+    totalPages: 1,
+    hasNextPage: false,
+    hasPrevPage: false,
+  });
+  const [ledgerLoading, setLedgerLoading] = useState(false);
 
   // Receipt Modal State
   const [receiptModalOpen, setReceiptModalOpen] = useState(false);
@@ -164,13 +179,30 @@ const Dashboard = () => {
     }
   };
 
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = async (targetPage = ledgerPage, targetLimit = ledgerLimit) => {
     setLoading(true);
     setError('');
     try {
-      const res = await dashboardAPI.getDashboard();
+      const res = await dashboardAPI.getDashboard({ page: targetPage, limit: targetLimit });
       if (res.data && (res.data.data || res.data)) {
-        setDashboardData(res.data.data || res.data);
+        const data = res.data.data || res.data;
+        setDashboardData(data);
+        const pagination = data.recentTransactionsPagination || data.pagination;
+        if (pagination) {
+          setLedgerPagination(pagination);
+          setLedgerPage(pagination.page || targetPage);
+          if (pagination.limit) setLedgerLimit(pagination.limit);
+        } else if (Array.isArray(data.recentTransactions)) {
+          const total = data.recentTransactions.length;
+          setLedgerPagination({
+            total,
+            page: targetPage,
+            limit: targetLimit,
+            totalPages: Math.ceil(total / targetLimit) || 1,
+            hasNextPage: false,
+            hasPrevPage: targetPage > 1,
+          });
+        }
       } else {
         setError(res.data?.message || 'Could not load real-time dashboard metrics.');
       }
@@ -180,6 +212,54 @@ const Dashboard = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLedgerPageChange = async (newPage, newLimit = ledgerLimit) => {
+    if (newPage < 1) return;
+    if (ledgerPagination.totalPages && newPage > ledgerPagination.totalPages) return;
+    if (newPage === ledgerPage && newLimit === ledgerLimit) return;
+
+    setLedgerLoading(true);
+    try {
+      const res = await dashboardAPI.getRecentTransactions(newPage, newLimit);
+      const resData = res.data?.data || res.data;
+      const txns = Array.isArray(resData?.transactions)
+        ? resData.transactions
+        : Array.isArray(resData)
+        ? resData
+        : res.data?.transactions || [];
+      const pagination = resData?.pagination || res.data?.pagination || {
+        total: txns.length,
+        page: newPage,
+        limit: newLimit,
+        totalPages: Math.ceil(txns.length / newLimit) || 1,
+        hasNextPage: false,
+        hasPrevPage: newPage > 1,
+      };
+
+      setDashboardData((prev) => (prev ? { ...prev, recentTransactions: txns } : prev));
+      setLedgerPagination(pagination);
+      setLedgerPage(newPage);
+      if (newLimit !== ledgerLimit) setLedgerLimit(newLimit);
+    } catch (err) {
+      console.error('Failed to load ledger page:', err);
+    } finally {
+      setLedgerLoading(false);
+    }
+  };
+
+  const getPageNumbers = (currentPage, totalPages) => {
+    if (!totalPages || totalPages <= 1) return [1];
+    if (totalPages <= 5) {
+      return Array.from({ length: totalPages }, (_, i) => i + 1);
+    }
+    if (currentPage <= 3) {
+      return [1, 2, 3, 4, '...', totalPages];
+    }
+    if (currentPage >= totalPages - 2) {
+      return [1, '...', totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+    }
+    return [1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages];
   };
 
   useEffect(() => {
@@ -192,16 +272,19 @@ const Dashboard = () => {
     };
 
     window.addEventListener('flowly:account-update', handleAccountUpdate);
+    window.addEventListener('flowly:account-suspended', handleAccountUpdate);
     window.addEventListener('focus', handleAccountUpdate);
 
     return () => {
       window.removeEventListener('flowly:account-update', handleAccountUpdate);
+      window.removeEventListener('flowly:account-suspended', handleAccountUpdate);
       window.removeEventListener('focus', handleAccountUpdate);
     };
   }, []);
 
   const kycStatus = user?.kycStatus || 'pending';
   const isMpinSet = user?.isMpinSet ?? false;
+  const isSuspended = account?.status === 'suspended' || user?.status === 'suspended';
 
   const activeFdTotal =
     dashboardData?.fds?.totalFdPrincipal ??
@@ -217,6 +300,67 @@ const Dashboard = () => {
 
   return (
     <div style={{ paddingBottom: '40px' }}>
+      {/* ---------------- SECURITY FREEZE / SUSPENDED TRANSACTIONS ALERT ---------------- */}
+      {isSuspended && (
+        <div
+          style={{
+            padding: '16px 20px',
+            borderRadius: '14px',
+            backgroundColor: '#FEF2F2',
+            border: '1.5px solid #FCA5A5',
+            color: '#991B1B',
+            marginBottom: '20px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '12px',
+            boxShadow: '0 4px 12px rgba(220, 38, 38, 0.08)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+            <div
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '10px',
+                backgroundColor: '#FEE2E2',
+                color: '#DC2626',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <ShieldAlert size={22} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: '15px', color: '#991B1B' }}>
+                Money Transactions Temporarily Blocked
+              </div>
+              <div style={{ fontSize: '12.5px', color: '#7F1D1D', marginTop: '2px', lineHeight: 1.4 }}>
+                A reported debit transaction has placed a temporary security freeze on your account. For your safety, outgoing transfers and withdrawals are paused until an authorized bank worker reviews the report and enables transactions back from the worker desk.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => navigate('/help?tab=tickets')}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: '1px solid #DC2626',
+              backgroundColor: '#FFFFFF',
+              color: '#DC2626',
+              fontWeight: 700,
+              fontSize: '12.5px',
+              cursor: 'pointer',
+            }}
+          >
+            View Ticket Status ↗
+          </button>
+        </div>
+      )}
+
       {/* ---------------- WELCOME HEADER ---------------- */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
@@ -590,7 +734,21 @@ const Dashboard = () => {
         {/* Recent Transactions Panel */}
         <div className="flowly-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
-            <h3 style={{ fontSize: '16px', margin: 0 }}>Recent Account Ledger</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h3 style={{ fontSize: '16px', margin: 0 }}>Recent Account Ledger</h3>
+              {ledgerPagination?.total > 0 && (
+                <span style={{
+                  fontSize: '11px',
+                  backgroundColor: '#F3EDF7',
+                  color: '#5C187B',
+                  padding: '2px 8px',
+                  borderRadius: '12px',
+                  fontWeight: 600
+                }}>
+                  {ledgerPagination.total} {ledgerPagination.total === 1 ? 'record' : 'records'}
+                </span>
+              )}
+            </div>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 onClick={handleDownloadStatement}
@@ -614,98 +772,260 @@ const Dashboard = () => {
             </div>
           </div>
 
-          {dashboardData?.recentTransactions && dashboardData.recentTransactions.length > 0 ? (
-            <div style={{ overflowX: 'auto' }}>
-              <table className="flowly-table">
-                <thead>
-                  <tr>
-                    <th>Type / Description</th>
-                    <th>Date</th>
-                    <th style={{ textAlign: 'right' }}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dashboardData.recentTransactions.map((tx) => {
-                    const isWithdrawal = tx.type === 'withdrawal' || tx.transactionType === 'WITHDRAWAL' || tx.category === 'withdrawal';
-                    const isCashDeposit = !isWithdrawal && (tx.category === 'cash_deposit' || tx.transactionType === 'CASH_DEPOSIT' || (tx.receiptNumber && (tx.type === 'credit' || tx.type === 'deposit')));
-                    const receiptNo = tx.receiptNumber || tx.meta?.receiptNumber;
-                    return (
-                      <tr key={tx._id || tx.id}>
-                        <td>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div style={{
-                              width: '26px',
+          <div style={{ position: 'relative', minHeight: '180px' }}>
+            {ledgerLoading && (
+              <div style={{
+                position: 'absolute',
+                inset: 0,
+                backgroundColor: 'rgba(255, 255, 255, 0.7)',
+                backdropFilter: 'blur(1px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 5,
+                borderRadius: '8px'
+              }}>
+                <div style={{
+                  fontSize: '12px',
+                  color: '#5C187B',
+                  fontWeight: 600,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  backgroundColor: '#FFFFFF',
+                  padding: '6px 14px',
+                  borderRadius: '20px',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
+                }}>
+                  <Clock size={14} /> Loading ledger entries...
+                </div>
+              </div>
+            )}
+
+            {dashboardData?.recentTransactions && dashboardData.recentTransactions.length > 0 ? (
+              <>
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="flowly-table">
+                    <thead>
+                      <tr>
+                        <th>Type / Description</th>
+                        <th>Date</th>
+                        <th style={{ textAlign: 'right' }}>Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dashboardData.recentTransactions.map((tx) => {
+                        const isWithdrawal = tx.type === 'withdrawal' || tx.transactionType === 'WITHDRAWAL' || tx.category === 'withdrawal';
+                        const isCashDeposit = !isWithdrawal && (tx.category === 'cash_deposit' || tx.transactionType === 'CASH_DEPOSIT' || (tx.receiptNumber && (tx.type === 'credit' || tx.type === 'deposit')));
+                        const receiptNo = tx.receiptNumber || tx.meta?.receiptNumber;
+                        return (
+                          <tr key={tx._id || tx.id}>
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <div style={{
+                                  width: '26px',
+                                  height: '26px',
+                                  borderRadius: '50%',
+                                  backgroundColor: tx.type === 'credit' || tx.type === 'deposit' ? '#E4F4DC' : '#FADADA',
+                                  color: tx.type === 'credit' || tx.type === 'deposit' ? '#2E7A22' : '#B23A2E',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}>
+                                  {tx.type === 'credit' || tx.type === 'deposit' ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}
+                                </div>
+                                <div>
+                                  <div style={{ fontWeight: 600, fontSize: '13px', color: '#201530', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    {tx.description}
+                                    {isWithdrawal ? (
+                                      <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: '#B23A2E', color: 'white', fontWeight: 700 }}>
+                                        WITHDRAWAL
+                                      </span>
+                                    ) : isCashDeposit ? (
+                                      <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: '#5C187B', color: 'white', fontWeight: 700 }}>
+                                        CASH DEPOSIT
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div style={{ fontSize: '11px', color: '#6E677B' }}>
+                                    {tx.refType || 'Savings'} {receiptNo ? `• Ref: ${receiptNo}` : ''}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td style={{ fontSize: '12px', color: '#6E677B' }}>
+                              {new Date(tx.createdAt || tx.date).toLocaleDateString()}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                              <div style={{
+                                fontWeight: 700,
+                                fontSize: '13px',
+                                color: tx.type === 'credit' || tx.type === 'deposit' ? '#2E7A22' : '#201530'
+                              }}>
+                                {tx.type === 'credit' || tx.type === 'deposit' ? '+' : '-'}₹{tx.amount?.toLocaleString('en-IN')}
+                              </div>
+                              {receiptNo && (
+                                <button
+                                  onClick={() => handleViewReceipt(receiptNo)}
+                                  style={{
+                                    border: 'none',
+                                    background: 'none',
+                                    color: '#5C187B',
+                                    fontSize: '11px',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                    textDecoration: 'underline'
+                                  }}
+                                >
+                                  View Receipt
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Ledger Pagination Bar */}
+                {ledgerPagination && ledgerPagination.total > 0 && (
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginTop: '16px',
+                    paddingTop: '12px',
+                    borderTop: '1px solid #F0EEF4',
+                    flexWrap: 'wrap',
+                    gap: '10px'
+                  }}>
+                    {/* Range info and page limit select */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '12px', color: '#6E677B' }}>
+                      <span>
+                        Showing {Math.min((ledgerPagination.page - 1) * ledgerPagination.limit + 1, ledgerPagination.total)}–
+                        {Math.min(ledgerPagination.page * ledgerPagination.limit, ledgerPagination.total)} of{' '}
+                        <strong style={{ color: '#201530' }}>{ledgerPagination.total}</strong>
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <span style={{ fontSize: '11px', color: '#8E8799' }}>Rows:</span>
+                        <select
+                          value={ledgerLimit}
+                          onChange={(e) => {
+                            const newLim = parseInt(e.target.value, 10);
+                            setLedgerLimit(newLim);
+                            handleLedgerPageChange(1, newLim);
+                          }}
+                          style={{
+                            fontSize: '11px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            border: '1px solid #DDD7E3',
+                            backgroundColor: '#FFFFFF',
+                            color: '#201530',
+                            cursor: 'pointer'
+                          }}
+                          aria-label="Records per page"
+                        >
+                          <option value={5}>5</option>
+                          <option value={10}>10</option>
+                          <option value={20}>20</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Pagination Controls */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <button
+                        type="button"
+                        onClick={() => handleLedgerPageChange(ledgerPagination.page - 1)}
+                        disabled={!ledgerPagination.hasPrevPage || ledgerLoading}
+                        className="btn-outline-dark"
+                        style={{
+                          fontSize: '11px',
+                          padding: '4px 8px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '2px',
+                          opacity: (!ledgerPagination.hasPrevPage || ledgerLoading) ? 0.45 : 1,
+                          cursor: (!ledgerPagination.hasPrevPage || ledgerLoading) ? 'not-allowed' : 'pointer'
+                        }}
+                        aria-label="Previous page"
+                      >
+                        <ChevronLeft size={13} />
+                        <span>Prev</span>
+                      </button>
+
+                      {getPageNumbers(ledgerPagination.page, ledgerPagination.totalPages).map((p, idx) => {
+                        if (p === '...') {
+                          return (
+                            <span key={`ellipsis-${idx}`} style={{ fontSize: '11px', color: '#8E8799', padding: '0 4px' }}>
+                              …
+                            </span>
+                          );
+                        }
+                        const isCurrent = p === ledgerPagination.page;
+                        return (
+                          <button
+                            key={`page-${p}`}
+                            type="button"
+                            onClick={() => handleLedgerPageChange(p)}
+                            disabled={isCurrent || ledgerLoading}
+                            style={{
+                              minWidth: '26px',
                               height: '26px',
-                              borderRadius: '50%',
-                              backgroundColor: tx.type === 'credit' || tx.type === 'deposit' ? '#E4F4DC' : '#FADADA',
-                              color: tx.type === 'credit' || tx.type === 'deposit' ? '#2E7A22' : '#B23A2E',
+                              padding: '0 6px',
+                              fontSize: '11px',
+                              fontWeight: isCurrent ? 700 : 500,
+                              borderRadius: '6px',
+                              border: isCurrent ? '1px solid #5C187B' : '1px solid #DDD7E3',
+                              backgroundColor: isCurrent ? '#5C187B' : '#FFFFFF',
+                              color: isCurrent ? '#FFFFFF' : '#201530',
+                              cursor: isCurrent || ledgerLoading ? 'default' : 'pointer',
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center'
-                            }}>
-                              {tx.type === 'credit' || tx.type === 'deposit' ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}
-                            </div>
-                            <div>
-                              <div style={{ fontWeight: 600, fontSize: '13px', color: '#201530', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                {tx.description}
-                                {isWithdrawal ? (
-                                  <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: '#B23A2E', color: 'white', fontWeight: 700 }}>
-                                    WITHDRAWAL
-                                  </span>
-                                ) : isCashDeposit ? (
-                                  <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: '#5C187B', color: 'white', fontWeight: 700 }}>
-                                    CASH DEPOSIT
-                                  </span>
-                                ) : null}
-                              </div>
-                              <div style={{ fontSize: '11px', color: '#6E677B' }}>
-                                {tx.refType || 'Savings'} {receiptNo ? `• Ref: ${receiptNo}` : ''}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                        <td style={{ fontSize: '12px', color: '#6E677B' }}>
-                          {new Date(tx.createdAt || tx.date).toLocaleDateString()}
-                        </td>
-                        <td style={{ textAlign: 'right' }}>
-                          <div style={{
-                            fontWeight: 700,
-                            fontSize: '13px',
-                            color: tx.type === 'credit' || tx.type === 'deposit' ? '#2E7A22' : '#201530'
-                          }}>
-                            {tx.type === 'credit' || tx.type === 'deposit' ? '+' : '-'}₹{tx.amount?.toLocaleString('en-IN')}
-                          </div>
-                          {receiptNo && (
-                            <button
-                              onClick={() => handleViewReceipt(receiptNo)}
-                              style={{
-                                border: 'none',
-                                background: 'none',
-                                color: '#5C187B',
-                                fontSize: '11px',
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                                padding: 0,
-                                textDecoration: 'underline'
-                              }}
-                            >
-                              View Receipt
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div style={{ textAlign: 'center', padding: '36px 16px', color: '#A19AA8' }}>
-              <Activity size={36} style={{ marginBottom: '10px', opacity: 0.5 }} />
-              <p style={{ fontWeight: 600, color: '#201530', margin: 0 }}>No Recent Transactions</p>
-              <p style={{ fontSize: '13px' }}>Your deposit and loan payment history will appear here.</p>
-            </div>
-          )}
+                            }}
+                            aria-label={`Page ${p}`}
+                            aria-current={isCurrent ? 'page' : undefined}
+                          >
+                            {p}
+                          </button>
+                        );
+                      })}
+
+                      <button
+                        type="button"
+                        onClick={() => handleLedgerPageChange(ledgerPagination.page + 1)}
+                        disabled={!ledgerPagination.hasNextPage || ledgerLoading}
+                        className="btn-outline-dark"
+                        style={{
+                          fontSize: '11px',
+                          padding: '4px 8px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '2px',
+                          opacity: (!ledgerPagination.hasNextPage || ledgerLoading) ? 0.45 : 1,
+                          cursor: (!ledgerPagination.hasNextPage || ledgerLoading) ? 'not-allowed' : 'pointer'
+                        }}
+                        aria-label="Next page"
+                      >
+                        <span>Next</span>
+                        <ChevronRight size={13} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '36px 16px', color: '#A19AA8' }}>
+                <Activity size={36} style={{ marginBottom: '10px', opacity: 0.5 }} />
+                <p style={{ fontWeight: 600, color: '#201530', margin: 0 }}>No Recent Transactions</p>
+                <p style={{ fontSize: '13px' }}>Your deposit and loan payment history will appear here.</p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

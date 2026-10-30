@@ -10,7 +10,24 @@ const documentSchema = new mongoose.Schema(
 
     documentType: {
       type: String,
-      enum: ["aadhaar", "pan", "selfie", "salary_slip", "bank_statement"],
+      enum: [
+        "aadhaar",
+        "pan",
+        "selfie",
+        "salary_slip",
+        "bank_statement",
+        "tax_return",
+        "business_proof",
+        "address_proof",
+        "vehicle_quotation",
+        "admission_letter",
+        "loan_document",
+        "passport",
+        "voter_id",
+        "identity_proof",
+        "document",
+        "other",
+      ],
       required: true,
     },
 
@@ -38,7 +55,7 @@ const documentSchema = new mongoose.Schema(
 
     verificationStatus: {
       type: String,
-      enum: ["pending", "verified", "rejected"],
+      enum: ["pending", "under_verification", "verified", "rejected"],
       default: "pending",
     },
   },

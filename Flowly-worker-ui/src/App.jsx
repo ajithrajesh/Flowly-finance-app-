@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import './styles.css';
 import * as api from './api';
 import { getSocket, disconnectSocket } from './socket';
-import { IMPLEMENTED_ROUTES } from './data';
+import { PAGE_TITLES, useWorkerNavigation } from './navigation';
 
 import Login from './components/Login';
 import Sidebar from './components/Sidebar';
@@ -22,28 +23,90 @@ import CashDeposit from './components/CashDeposit';
 import CashWithdrawal from './components/CashWithdrawal';
 import Tickets from './components/Tickets';
 import Modal from './components/Modal';
-import Placeholder from './components/Placeholder';
 
-const PAGE_TITLES = {
-  dashboard: 'Dashboard',
-  customers: 'Customers',
-  'customer-detail': 'Customer',
-  'cash-deposit': 'Offline Cash Deposit Counter',
-  'cash-withdrawal': 'Offline Cash Withdrawal Counter',
-  kyc: 'KYC verification',
-  'video-kyc': 'Video KYC',
-  'loan-schemes': 'Loan Schemes & Document Requirements',
-  loan: 'Loan Processing',
-  emi: 'EMI Schedules, Collections & Recovery Desk',
-  'fd-schemes': 'FD Schemes Catalog Management',
-  fd: 'Fixed Deposit Review & Approvals',
-  tickets: 'Customer Support Tickets & Problem Resolution Desk',
-};
+function CustomerDetailRoute({
+  customers,
+  selectedCustomerId,
+  setSelectedCustomerId,
+  setCustomers,
+  onBackToCustomers,
+  onGoToKyc,
+  onToast,
+  onCustomerUpdated,
+}) {
+  const { id } = useParams();
+  const effectiveId = id || selectedCustomerId;
+  const [loading, setLoading] = useState(false);
 
-export default function App() {
+  useEffect(() => {
+    if (effectiveId && selectedCustomerId !== effectiveId) {
+      setSelectedCustomerId(effectiveId);
+    }
+  }, [effectiveId, selectedCustomerId, setSelectedCustomerId]);
+
+  useEffect(() => {
+    if (!effectiveId) return;
+    const exists = customers.some((c) => c.id === effectiveId);
+    if (!exists) {
+      let isMounted = true;
+      setLoading(true);
+      api
+        .fetchCustomerById(effectiveId)
+        .then((c) => {
+          if (isMounted && c) {
+            setCustomers((prev) => (prev.some((x) => x.id === c.id) ? prev : [...prev, c]));
+          }
+        })
+        .catch((err) => {
+          if (isMounted) onToast(err.message || 'Could not load customer');
+        })
+        .finally(() => {
+          if (isMounted) setLoading(false);
+        });
+      return () => {
+        isMounted = false;
+      };
+    }
+  }, [effectiveId, customers, setCustomers, onToast]);
+
+  const customer = customers.find((c) => c.id === effectiveId);
+
+  if (loading && !customer) {
+    return <div className="loading-panel">Loading customer…</div>;
+  }
+
+  if (!customer) {
+    return (
+      <div className="panel" style={{ padding: '24px', textAlign: 'center' }}>
+        <p style={{ color: '#64748B', marginBottom: '16px' }}>Customer not found.</p>
+        <button className="btn-outline btn-sm" onClick={onBackToCustomers}>
+          ← Back to customers
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <CustomerDetail
+      customer={customer}
+      onBackToCustomers={onBackToCustomers}
+      onGoToKyc={onGoToKyc}
+      onToast={onToast}
+      onCustomerUpdated={onCustomerUpdated}
+    />
+  );
+}
+
+function WorkerApp() {
   // ---- auth ---------------------------------------------------------
   const [worker, setWorker] = useState(api.getStoredWorker());
   const [authChecked, setAuthChecked] = useState(false);
+
+  const isSupport = worker?.role === 'support' || worker?.workerRole === 'support';
+  const defaultRoutePath = isSupport ? '/tickets' : '/dashboard';
+
+  // ---- router & history management ----------------------------------
+  const { currentRoute, pathname, navigate, goBack } = useWorkerNavigation(defaultRoutePath);
 
   useEffect(() => {
     if (!api.getToken()) {
@@ -54,19 +117,11 @@ export default function App() {
       .fetchMe()
       .then((me) => {
         setWorker(me);
-        if (me?.role === 'support' || me?.workerRole === 'support') {
-          setRoute('tickets');
-        }
       })
       .catch(() => setWorker(null))
       .finally(() => setAuthChecked(true));
   }, []);
 
-  // ---- navigation ----------------------------------------------------
-  const [route, setRoute] = useState(() => {
-    const stored = api.getStoredWorker();
-    return stored?.role === 'support' || stored?.workerRole === 'support' ? 'tickets' : 'dashboard';
-  });
   const [searchTerm, setSearchTerm] = useState('');
 
   // ---- customers -------------------------------------------------------
@@ -132,10 +187,14 @@ export default function App() {
 
   // ---- toast -------------------------------------------------------
   const [toast, setToast] = useState('');
+  const toastTimerRef = useRef(null);
+
   const showToast = useCallback((msg) => {
     setToast(msg);
-    window.clearTimeout(showToast._t);
-    showToast._t = window.setTimeout(() => setToast(''), 2800);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setToast(''), 2800);
   }, []);
 
   // ---- modal / confirm actions -----------------------------------------
@@ -176,7 +235,6 @@ export default function App() {
     }
   };
 
-  // ---- navigation helpers -----------------------------------------------
   // ---- notifications & socket -------------------------------------------
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -230,23 +288,35 @@ export default function App() {
     };
   }, [worker, loadUnreadCount, showToast]);
 
-  const handleNavigate = (key) => {
-    setRoute(key);
-  };
+  // ---- navigation handlers ----------------------------------------------
+  const handleNavigate = useCallback(
+    (key, options) => {
+      navigate(key, options);
+    },
+    [navigate]
+  );
 
-  const handleOpenCustomer = async (id) => {
-    setSelectedCustomerId(id);
-    setRoute('customer-detail');
-    // Make sure we have full details even if this customer wasn't on the current page
-    if (!customers.find((c) => c.id === id)) {
-      try {
-        const c = await api.fetchCustomerById(id);
-        setCustomers((prev) => [...prev, c]);
-      } catch (err) {
-        showToast(err.message || 'Could not load customer');
+  const handleOpenCustomer = useCallback(
+    async (id) => {
+      setSelectedCustomerId(id);
+      navigate(`/customers/${id}`);
+      if (!customers.find((c) => c.id === id)) {
+        try {
+          const c = await api.fetchCustomerById(id);
+          if (c) {
+            setCustomers((prev) => (prev.some((x) => x.id === c.id) ? prev : [...prev, c]));
+          }
+        } catch (err) {
+          showToast(err.message || 'Could not load customer');
+        }
       }
-    }
-  };
+    },
+    [customers, navigate, showToast]
+  );
+
+  const handleBackToCustomers = useCallback(() => {
+    goBack('/customers');
+  }, [goBack]);
 
   const handleCustomerUpdated = (updated) => {
     if (!updated?.id) return;
@@ -264,130 +334,179 @@ export default function App() {
     setSearchTerm(value);
     setPage(1);
     loadCustomers(1, value);
+    if (value && currentRoute !== 'customers' && currentRoute !== 'customer-detail') {
+      navigate('/customers');
+    }
   };
 
   const handleLogout = () => {
     api.logoutWorker();
     disconnectSocket();
     setWorker(null);
+    navigate('/', { replace: true });
   };
-
-  // ---- render ------------------------------------------------------------
-
-  if (!authChecked) {
-    return <div className="loading-panel">Loading…</div>;
-  }
 
   const handleLoggedIn = (w) => {
     setWorker(w);
-    if (w?.role === 'support' || w?.workerRole === 'support') {
-      setRoute('tickets');
-    } else {
-      setRoute('dashboard');
-    }
+    const isSupportRole = w?.role === 'support' || w?.workerRole === 'support';
+    const fallbackDefault = isSupportRole ? '/tickets' : '/dashboard';
+    const destination =
+      pathname && pathname !== '/' && pathname !== '/dashboard'
+        ? pathname
+        : fallbackDefault;
+    navigate(destination, { replace: true });
   };
+
+  // ---- render ------------------------------------------------------------
+  if (!authChecked) {
+    return <div className="loading-panel">Loading…</div>;
+  }
 
   if (!worker) {
     return <Login onLoggedIn={handleLoggedIn} />;
   }
 
-  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
-
-  let content;
-  if (!IMPLEMENTED_ROUTES.includes(route)) {
-    content = <Placeholder label={PAGE_TITLES[route] || route} />;
-  } else if (route === 'dashboard') {
-    content = (
-      <Dashboard
-        onNavigate={handleNavigate}
-        onSelectKyc={(id) => {
-          setKycSelectedId(id);
-        }}
-      />
-    );
-  } else if (route === 'customers') {
-    content = customersLoading ? (
-      <div className="loading-panel">Loading customers…</div>
-    ) : customersError ? (
-      <div className="error-banner">{customersError}</div>
-    ) : (
-      <Customers
-        customers={customers}
-        pagination={pagination}
-        page={page}
-        onPageChange={handlePageChange}
-        searchTerm={searchTerm}
-        onOpenCustomer={handleOpenCustomer}
-      />
-    );
-  } else if (route === 'customer-detail') {
-    content = selectedCustomer ? (
-      <CustomerDetail
-        customer={selectedCustomer}
-        onBackToCustomers={() => setRoute('customers')}
-        onGoToKyc={() => setRoute('kyc')}
-        onToast={showToast}
-        onCustomerUpdated={handleCustomerUpdated}
-      />
-    ) : (
-      <div className="loading-panel">Loading customer…</div>
-    );
-  } else if (route === 'kyc') {
-    content = kycLoading ? (
-      <div className="loading-panel">Loading KYC queue…</div>
-    ) : kycError ? (
-      <div className="error-banner">{kycError}</div>
-    ) : (
-      <KycVerification
-        kycQueue={kycQueue}
-        kycSelectedId={kycSelectedId}
-        onSelect={handleSelectKyc}
-        customers={customers}
-        onOpenConfirm={openConfirm}
-        onToast={showToast}
-        onNavigate={handleNavigate}
-      />
-    );
-  } else if (route === 'video-kyc') {
-    content = (
-      <VideoKyc
-        kycQueue={kycQueue}
-        customers={customers}
-        onToast={showToast}
-        onKycChanged={loadKycQueue}
-      />
-    );
-  } else if (route === 'cash-deposit') {
-    content = <CashDeposit onToast={showToast} />;
-  } else if (route === 'cash-withdrawal') {
-    content = <CashWithdrawal onToast={showToast} />;
-  } else if (route === 'loan-schemes') {
-    content = <LoanSchemeManagement onToast={showToast} />;
-  } else if (route === 'loan') {
-    content = <LoanProcessing onToast={showToast} />;
-  } else if (route === 'emi') {
-    content = <EmiCollections onToast={showToast} worker={worker} />;
-  } else if (route === 'fd-schemes') {
-    content = <FdSchemeManagement onToast={showToast} />;
-  } else if (route === 'fd') {
-    content = <FdProcessing onToast={showToast} />;
-  } else if (route === 'tickets') {
-    content = <Tickets onToast={showToast} worker={worker} />;
-  }
-
   return (
     <div className="flex h-screen">
-      <Sidebar route={route} onNavigate={handleNavigate} worker={worker} />
+      <Sidebar route={currentRoute} onNavigate={handleNavigate} worker={worker} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar
-          pageTitle={PAGE_TITLES[route] || route}
+          pageTitle={PAGE_TITLES[currentRoute] || currentRoute}
           worker={worker}
           onSearch={handleSearch}
           unreadCount={unreadCount}
           onNotify={() => setNotificationsOpen(true)}
           onProfile={handleLogout}
         />
-        <main className="flex-1 overflow-y-auto px-[22px] py-5">{content}</main>
+        <main className="flex-1 overflow-y-auto px-[22px] py-5">
+          <Routes>
+            <Route path="/" element={<Navigate to={defaultRoutePath} replace />} />
+            <Route
+              path="/dashboard"
+              element={
+                <Dashboard
+                  onNavigate={handleNavigate}
+                  onSelectKyc={(id) => {
+                    setKycSelectedId(id);
+                    handleNavigate('kyc');
+                  }}
+                />
+              }
+            />
+            <Route
+              path="/customers"
+              element={
+                customersLoading ? (
+                  <div className="loading-panel">Loading customers…</div>
+                ) : customersError ? (
+                  <div className="error-banner">{customersError}</div>
+                ) : (
+                  <Customers
+                    customers={customers}
+                    pagination={pagination}
+                    page={page}
+                    onPageChange={handlePageChange}
+                    searchTerm={searchTerm}
+                    onOpenCustomer={handleOpenCustomer}
+                  />
+                )
+              }
+            />
+            <Route
+              path="/customers/:id"
+              element={
+                <CustomerDetailRoute
+                  customers={customers}
+                  selectedCustomerId={selectedCustomerId}
+                  setSelectedCustomerId={setSelectedCustomerId}
+                  setCustomers={setCustomers}
+                  onBackToCustomers={handleBackToCustomers}
+                  onGoToKyc={() => handleNavigate('kyc')}
+                  onToast={showToast}
+                  onCustomerUpdated={handleCustomerUpdated}
+                />
+              }
+            />
+            <Route
+              path="/customer-detail"
+              element={
+                selectedCustomerId ? (
+                  <Navigate to={`/customers/${selectedCustomerId}`} replace />
+                ) : (
+                  <Navigate to="/customers" replace />
+                )
+              }
+            />
+            <Route
+              path="/customer-detail/:id"
+              element={
+                <CustomerDetailRoute
+                  customers={customers}
+                  selectedCustomerId={selectedCustomerId}
+                  setSelectedCustomerId={setSelectedCustomerId}
+                  setCustomers={setCustomers}
+                  onBackToCustomers={handleBackToCustomers}
+                  onGoToKyc={() => handleNavigate('kyc')}
+                  onToast={showToast}
+                  onCustomerUpdated={handleCustomerUpdated}
+                />
+              }
+            />
+            <Route
+              path="/kyc"
+              element={
+                kycLoading ? (
+                  <div className="loading-panel">Loading KYC queue…</div>
+                ) : kycError ? (
+                  <div className="error-banner">{kycError}</div>
+                ) : (
+                  <KycVerification
+                    kycQueue={kycQueue}
+                    kycSelectedId={kycSelectedId}
+                    onSelect={handleSelectKyc}
+                    customers={customers}
+                    onOpenConfirm={openConfirm}
+                    onToast={showToast}
+                    onNavigate={handleNavigate}
+                    onKycChanged={loadKycQueue}
+                  />
+                )
+              }
+            />
+            <Route
+              path="/video-kyc"
+              element={
+                <VideoKyc
+                  kycQueue={kycQueue}
+                  customers={customers}
+                  onToast={showToast}
+                  onKycChanged={loadKycQueue}
+                />
+              }
+            />
+            <Route path="/cash-deposit" element={<CashDeposit onToast={showToast} />} />
+            <Route path="/cash-withdrawal" element={<CashWithdrawal onToast={showToast} />} />
+            <Route path="/loan-schemes" element={<LoanSchemeManagement onToast={showToast} />} />
+            <Route path="/loan" element={<LoanProcessing onToast={showToast} />} />
+            <Route path="/emi" element={<EmiCollections onToast={showToast} worker={worker} />} />
+            <Route path="/fd-schemes" element={<FdSchemeManagement onToast={showToast} />} />
+            <Route path="/fd" element={<FdProcessing onToast={showToast} />} />
+            <Route path="/tickets" element={<Tickets onToast={showToast} worker={worker} />} />
+            {/* Fallback route */}
+            <Route
+              path="*"
+              element={
+                <div className="panel" style={{ padding: '24px', textAlign: 'center' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: 700, marginBottom: '8px' }}>Page Not Found</h3>
+                  <p style={{ color: '#64748B', marginBottom: '16px' }}>The requested page does not exist.</p>
+                  <button className="btn-outline btn-sm" onClick={() => handleNavigate('dashboard')}>
+                    Return to Dashboard
+                  </button>
+                </div>
+              }
+            />
+          </Routes>
+        </main>
       </div>
 
       <Modal modal={modal} submitting={submitting} onClose={closeModal} onConfirm={handleConfirm} />
@@ -404,5 +523,13 @@ export default function App() {
         {toast}
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <WorkerApp />
+    </BrowserRouter>
   );
 }

@@ -439,10 +439,23 @@ export const listCashDeposits = async ({ user, page = 1, limit = 20 }) => {
     Transaction.countDocuments(filter),
   ]);
 
+  const totalPages = Math.ceil(total / l) || 0;
+
   return {
     total,
     page: p,
     limit: l,
+    totalPages,
+    hasPrevPage: p > 1,
+    hasNextPage: p < totalPages,
+    pagination: {
+      total,
+      page: p,
+      limit: l,
+      totalPages,
+      hasPrevPage: p > 1,
+      hasNextPage: p < totalPages,
+    },
     deposits: txns.map((t) => buildReceipt(t, t.account)),
   };
 };

@@ -369,15 +369,67 @@ export const getWorkerMonitor = async (req, res) => {
 /**
  * POST /api/admin/workers
  * Admin registers a new worker or admin team member.
+ * Restricts all worker creation to authorized administrators only.
  */
 export const createWorkerAccount = async (req, res) => {
   try {
+    // 1. Restrict worker creation to authorized administrators only
+    if (!req.user || req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Administrator access is required to create worker accounts.",
+      });
+    }
+
     const { name, email, phone, password, role = "worker" } = req.body;
 
     if (!name || !email || !password || !phone) {
       return res.status(400).json({
         success: false,
         message: "Name, email, phone, and password are required to add staff",
+      });
+    }
+
+    // 2. Server-side role validation
+    const ALLOWED_STAFF_ROLES = ["worker", "admin", "support"];
+    const targetRole = role ? String(role).toLowerCase().trim() : "worker";
+
+    if (!ALLOWED_STAFF_ROLES.includes(targetRole)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid role specified. Allowable staff roles are: ${ALLOWED_STAFF_ROLES.join(", ")}.`,
+      });
+    }
+
+    // Validate workerRole subrole if provided
+    const ALLOWED_WORKER_SUBROLES = ["general", "support"];
+    if (req.body.workerRole !== undefined) {
+      const normalizedWorkerRole = String(req.body.workerRole).toLowerCase().trim();
+      if (!ALLOWED_WORKER_SUBROLES.includes(normalizedWorkerRole)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid workerRole specified. Allowable worker sub-roles are: ${ALLOWED_WORKER_SUBROLES.join(", ")}.`,
+        });
+      }
+    }
+
+    // Validate status if provided
+    const ALLOWED_STATUSES = ["active", "inactive", "blocked"];
+    if (req.body.status !== undefined) {
+      const normalizedStatus = String(req.body.status).toLowerCase().trim();
+      if (!ALLOWED_STATUSES.includes(normalizedStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status specified. Allowable statuses are: ${ALLOWED_STATUSES.join(", ")}.`,
+        });
+      }
+    }
+
+    // 3. Prevent workers from assigning or promoting admin roles
+    if (targetRole === "admin" && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Workers cannot assign or promote admin roles. Administrator access is required.",
       });
     }
 
@@ -395,7 +447,7 @@ export const createWorkerAccount = async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const newWorkerRole = ["worker", "admin", "support"].includes(role) ? role : "worker";
+    const newWorkerRole = targetRole;
     const subRole = newWorkerRole === "support" ? "support" : (req.body.workerRole || "general");
     const supportOrder = req.body.rotationOrder || (newWorkerRole === "support" ? (await User.countDocuments({ role: "support" })) + 1 : 0);
 
@@ -408,7 +460,9 @@ export const createWorkerAccount = async (req, res) => {
       workerRole: subRole,
       rotationOrder: supportOrder,
       kycStatus: "verified",
-      status: "active",
+      status: req.body.status && ALLOWED_STATUSES.includes(String(req.body.status).toLowerCase().trim())
+        ? String(req.body.status).toLowerCase().trim()
+        : "active",
     });
 
     // Notify admins of staff creation
@@ -452,13 +506,61 @@ export const createWorkerAccount = async (req, res) => {
 };
 
 /**
- * PATCH /api/admin/workers/:id/status
- * Admin updates a worker's active status (active, blocked, inactive).
+ * PATCH & PUT /api/admin/workers/:id/status
+ * Admin updates a worker's active status (active, blocked, inactive) or role.
+ * Restricts all worker role & status management to authorized administrators only.
  */
 export const updateWorkerStatus = async (req, res) => {
   try {
+    // 1. Restrict worker role/status management to authorized administrators only
+    if (!req.user || req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Administrator access is required to update worker role or status.",
+      });
+    }
+
     const { id } = req.params;
     const { status, role } = req.body;
+
+    if (status === undefined && role === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid status or role to update",
+      });
+    }
+
+    // 2. Validate status if supplied
+    const ALLOWED_STATUSES = ["active", "inactive", "blocked"];
+    if (status !== undefined) {
+      const normalizedStatus = String(status).toLowerCase().trim();
+      if (!ALLOWED_STATUSES.includes(normalizedStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status specified. Allowable statuses are: ${ALLOWED_STATUSES.join(", ")}.`,
+        });
+      }
+    }
+
+    // 3. Validate role if supplied & prevent workers from assigning or promoting admin roles
+    const ALLOWED_STAFF_ROLES = ["worker", "admin", "support"];
+    if (role !== undefined) {
+      const normalizedRole = String(role).toLowerCase().trim();
+      if (!ALLOWED_STAFF_ROLES.includes(normalizedRole)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid role specified. Allowable roles are: ${ALLOWED_STAFF_ROLES.join(", ")}.`,
+        });
+      }
+
+      // Explicit check: Prevent workers from assigning or promoting admin roles
+      if (normalizedRole === "admin" && req.user?.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized: Workers cannot assign or promote admin roles. Administrator access is required.",
+        });
+      }
+    }
 
     const worker = await User.findById(id);
     if (!worker || !["worker", "admin", "support"].includes(worker.role)) {
@@ -468,14 +570,17 @@ export const updateWorkerStatus = async (req, res) => {
       });
     }
 
-    if (status && ["active", "inactive", "blocked"].includes(status)) {
-      worker.status = status;
+    if (status !== undefined) {
+      worker.status = String(status).toLowerCase().trim();
     }
 
-    if (role && ["worker", "admin", "support"].includes(role)) {
-      worker.role = role;
-      if (role === "support") {
+    if (role !== undefined) {
+      const normalizedRole = String(role).toLowerCase().trim();
+      worker.role = normalizedRole;
+      if (normalizedRole === "support") {
         worker.workerRole = "support";
+      } else if (normalizedRole === "worker" && worker.workerRole === "support") {
+        worker.workerRole = "general";
       }
     }
 

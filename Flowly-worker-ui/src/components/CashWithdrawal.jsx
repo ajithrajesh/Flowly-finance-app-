@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
+import Pagination from './Pagination';
 
 export default function CashWithdrawal({ onToast }) {
   // Search & account selection state
@@ -38,23 +39,36 @@ export default function CashWithdrawal({ onToast }) {
   // Recent withdrawals list
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
+  const [pagination, setPagination] = useState(null);
 
-  const loadWithdrawalHistory = useCallback(async () => {
+  const loadWithdrawalHistory = useCallback(async (p = 1, l = 10) => {
     setHistoryLoading(true);
     try {
-      const data = await api.fetchCashWithdrawals({ page: 1, limit: 20 });
+      const data = await api.fetchCashWithdrawals({ page: p, limit: l });
       setHistory(data?.withdrawals || []);
+      setPagination(
+        data?.pagination || {
+          total: data?.total || 0,
+          page: p,
+          limit: l,
+          totalPages: Math.max(1, Math.ceil((data?.total || 0) / l)),
+          hasPrevPage: p > 1,
+          hasNextPage: p * l < (data?.total || 0),
+        }
+      );
     } catch (err) {
       console.error('Failed to load withdrawal history:', err);
       if (onToast) onToast(err.message || 'Failed to load withdrawal history');
     } finally {
       setHistoryLoading(false);
     }
-  }, []);
+  }, [onToast]);
 
   useEffect(() => {
-    loadWithdrawalHistory();
-  }, [loadWithdrawalHistory]);
+    loadWithdrawalHistory(page, limit);
+  }, [page, limit, loadWithdrawalHistory]);
 
   const handleSearch = async (e) => {
     if (e) e.preventDefault();
@@ -148,7 +162,8 @@ export default function CashWithdrawal({ onToast }) {
         if (onToast) onToast(res?.message || 'Cash withdrawal processed successfully!');
         // Reset withdrawal form & reload history
         handleClearSelection();
-        await loadWithdrawalHistory();
+        setPage(1);
+        await loadWithdrawalHistory(1, limit);
       } else {
         setFormError(res?.message || 'Cash withdrawal processed, but receipt details were missing.');
       }
@@ -394,7 +409,7 @@ export default function CashWithdrawal({ onToast }) {
           <div className="panel">
             <div className="panel-head">
               <span className="panel-title">Recent Counter Cash Withdrawals</span>
-              <button onClick={loadWithdrawalHistory} className="panel-link">
+              <button onClick={() => loadWithdrawalHistory(page, limit)} className="panel-link">
                 Refresh
               </button>
             </div>
@@ -402,47 +417,61 @@ export default function CashWithdrawal({ onToast }) {
             {historyLoading ? (
               <div className="loading-panel">Loading withdrawal records...</div>
             ) : history.length > 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {history.map((t) => (
-                  <div
-                    key={t.transactionId || t.receiptNumber}
-                    style={{
-                      padding: '12px',
-                      borderRadius: '8px',
-                      border: '1px solid #e0d9ec',
-                      backgroundColor: '#ffffff',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: '13px', color: '#241531' }}>
-                        {t.customerName || 'Customer'}
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {history.map((t) => (
+                    <div
+                      key={t.transactionId || t.receiptNumber}
+                      style={{
+                        padding: '12px',
+                        borderRadius: '8px',
+                        border: '1px solid #e0d9ec',
+                        backgroundColor: '#ffffff',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: '13px', color: '#241531' }}>
+                          {t.customerName || 'Customer'}
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#685e75' }}>
+                          {t.accountNumber} • Ref: {t.receiptNumber}
+                        </div>
+                        <div style={{ fontSize: '10px', color: '#9a90a8', marginTop: '2px' }}>
+                          {new Date(t.timestamp).toLocaleString()}
+                        </div>
                       </div>
-                      <div style={{ fontSize: '11px', color: '#685e75' }}>
-                        {t.accountNumber} • Ref: {t.receiptNumber}
-                      </div>
-                      <div style={{ fontSize: '10px', color: '#9a90a8', marginTop: '2px' }}>
-                        {new Date(t.timestamp).toLocaleString()}
-                      </div>
-                    </div>
 
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontWeight: 800, fontSize: '14px', color: '#b23a2e' }}>
-                        -₹{Number(t.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontWeight: 800, fontSize: '14px', color: '#b23a2e' }}>
+                          -₹{Number(t.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </div>
+                        <button
+                          onClick={() => handleViewReceipt(t.receiptNumber)}
+                          className="panel-link"
+                          style={{ fontSize: '11px', marginTop: '4px' }}
+                        >
+                          View Receipt
+                        </button>
                       </div>
-                      <button
-                        onClick={() => handleViewReceipt(t.receiptNumber)}
-                        className="panel-link"
-                        style={{ fontSize: '11px', marginTop: '4px' }}
-                      >
-                        View Receipt
-                      </button>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+                {pagination && (
+                  <Pagination
+                    pagination={pagination}
+                    page={page}
+                    limit={limit}
+                    onPageChange={setPage}
+                    onLimitChange={setLimit}
+                    limitOptions={[5, 10, 20]}
+                    itemLabel="withdrawals"
+                    compact={true}
+                  />
+                )}
+              </>
             ) : (
               <div style={{ textAlign: 'center', padding: '30px', color: '#9a90a8', fontSize: '13px' }}>
                 No recent counter cash withdrawals recorded.

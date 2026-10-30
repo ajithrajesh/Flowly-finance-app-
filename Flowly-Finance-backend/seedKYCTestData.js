@@ -103,11 +103,50 @@ async function seed() {
       console.log(`Reused existing user: ${t.email}`);
     }
 
+    const aadhaarCloudinaryUrl =
+      "https://res.cloudinary.com/debacmaqq/image/authenticated/s--JXE6tlyp--/v1793038086/flowly-kyc-backend/template-seed/aadhaar-1793038085597-ypcxvk.png?_a=BAMAROTI0";
+    const panCloudinaryUrl =
+      "https://res.cloudinary.com/debacmaqq/image/authenticated/s--XgT8ssEU--/v1793038029/flowly-kyc-backend/template-seed/pan-1793038028740-j3s9ke.png?_a=BAMAROTI0";
+    const selfieCloudinaryUrl =
+      "https://res.cloudinary.com/debacmaqq/image/authenticated/s--JiPfpeY_--/v1793038091/flowly-kyc-backend/template-seed/selfie-1793038091146-zuwucv.png?_a=BAMAROTI0";
+
+    const isPan = t.idType === "pan";
+    const primaryUrl = isPan ? panCloudinaryUrl : aadhaarCloudinaryUrl;
+
     const documentRecord = await Document.create({
       user: user._id,
-      documentType: t.idType === "pan" ? "pan" : "aadhaar",
-      fileUrl: `https://example.test/dummy-docs/${t.idType}-${t.phone}.jpg`,
-      verificationStatus: "pending",
+      documentType: isPan ? "pan" : "aadhaar",
+      fileUrl: primaryUrl,
+      publicId: `flowly-kyc-backend/template-seed/${isPan ? "pan" : "aadhaar"}`,
+      storageProvider: "cloudinary",
+      verificationStatus: "under_verification",
+    });
+
+    const aadhaarDoc = await Document.create({
+      user: user._id,
+      documentType: "aadhaar",
+      fileUrl: aadhaarCloudinaryUrl,
+      publicId: "flowly-kyc-backend/template-seed/aadhaar",
+      storageProvider: "cloudinary",
+      verificationStatus: "under_verification",
+    });
+
+    const panDoc = await Document.create({
+      user: user._id,
+      documentType: "pan",
+      fileUrl: panCloudinaryUrl,
+      publicId: "flowly-kyc-backend/template-seed/pan",
+      storageProvider: "cloudinary",
+      verificationStatus: "under_verification",
+    });
+
+    const selfieDoc = await Document.create({
+      user: user._id,
+      documentType: "selfie",
+      fileUrl: selfieCloudinaryUrl,
+      publicId: "flowly-kyc-backend/template-seed/selfie",
+      storageProvider: "cloudinary",
+      verificationStatus: "under_verification",
     });
 
     let kyc = await KYC.findOne({ user: user._id });
@@ -117,8 +156,14 @@ async function seed() {
       address: t.address,
       idType: t.idType,
       idNumber: t.idNumber,
-      documentUrl: documentRecord.fileUrl,
+      documentUrl: primaryUrl,
       document: documentRecord._id,
+      aadhaarUrl: aadhaarCloudinaryUrl,
+      aadhaarDocument: aadhaarDoc._id,
+      panUrl: panCloudinaryUrl,
+      panDocument: panDoc._id,
+      selfieUrl: selfieCloudinaryUrl,
+      selfieDocument: selfieDoc._id,
       verificationStatus: "under_verification",
       rejectionReason: "",
     };

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
 import Icon from './Icon';
+import Pagination from './Pagination';
 
 export default function EmiCollections({ onToast, worker }) {
   const [loans, setLoans] = useState([]);
@@ -17,6 +18,9 @@ export default function EmiCollections({ onToast, worker }) {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
+  const [pagination, setPagination] = useState(null);
 
   // Filters & Search
   const [activeTab, setActiveTab] = useState('all'); // 'all' | 'overdue' | 'active' | 'closed'
@@ -57,21 +61,26 @@ export default function EmiCollections({ onToast, worker }) {
       const data = await api.fetchCollectionsOverview({
         status: activeTab,
         search: searchTerm,
+        page,
+        limit,
+        sortBy,
       });
 
       if (data && data.success) {
         setLoans(data.loans || []);
+        setPagination(data.pagination || null);
         if (data.stats) {
           setStats(data.stats);
         }
       } else {
         // Fallback to loan applications + overdue if backend collections endpoint fails
         const [appsRes, overdueRes] = await Promise.all([
-          api.fetchLoanApplications().catch(() => ({ applications: [] })),
-          api.fetchOverdueLoans().catch(() => []),
+          api.fetchLoanApplications({ page, limit }).catch(() => ({ applications: [] })),
+          api.fetchOverdueLoans({ page, limit }).catch(() => ({ loans: [] })),
         ]);
         const allApps = appsRes.applications || [];
         setLoans(allApps.filter((a) => ['disbursed', 'active', 'closed', 'approved'].includes(a.status)));
+        setPagination(appsRes.pagination || null);
       }
     } catch (err) {
       console.error('Failed to load collections:', err);
@@ -79,7 +88,7 @@ export default function EmiCollections({ onToast, worker }) {
     } finally {
       setLoading(false);
     }
-  }, [activeTab, searchTerm]);
+  }, [activeTab, searchTerm, page, limit, sortBy]);
 
   useEffect(() => {
     loadCollections();
@@ -335,19 +344,19 @@ export default function EmiCollections({ onToast, worker }) {
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
           <button
             type="button"
-            onClick={() => setActiveTab('all')}
+            onClick={() => { setActiveTab('all'); setPage(1); }}
             className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-colors ${
               activeTab === 'all'
                 ? 'bg-slate-900 text-white shadow-xs'
                 : 'text-slate-600 hover:bg-slate-100'
             }`}
           >
-            All Portfolios ({stats.totalLoans || loans.length})
+            All Portfolios ({stats.totalLoans || (pagination ? pagination.total : loans.length)})
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('overdue')}
+            onClick={() => { setActiveTab('overdue'); setPage(1); }}
             className={`flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-bold transition-colors ${
               activeTab === 'overdue'
                 ? 'bg-red-600 text-white shadow-xs'
@@ -362,7 +371,7 @@ export default function EmiCollections({ onToast, worker }) {
 
           <button
             type="button"
-            onClick={() => setActiveTab('active')}
+            onClick={() => { setActiveTab('active'); setPage(1); }}
             className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-colors ${
               activeTab === 'active'
                 ? 'bg-emerald-600 text-white shadow-xs'
@@ -374,7 +383,7 @@ export default function EmiCollections({ onToast, worker }) {
 
           <button
             type="button"
-            onClick={() => setActiveTab('closed')}
+            onClick={() => { setActiveTab('closed'); setPage(1); }}
             className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-colors ${
               activeTab === 'closed'
                 ? 'bg-slate-700 text-white shadow-xs'
@@ -392,13 +401,19 @@ export default function EmiCollections({ onToast, worker }) {
               type="text"
               placeholder="Search borrower, loan #, phone…"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setPage(1);
+              }}
               className="w-full rounded-xl border border-slate-200 bg-slate-50/60 py-1.5 pr-8 pl-3 text-xs text-ink placeholder:text-muted focus:border-accent focus:bg-white focus:outline-none"
             />
             {searchTerm && (
               <button
                 type="button"
-                onClick={() => setSearchTerm('')}
+                onClick={() => {
+                  setSearchTerm('');
+                  setPage(1);
+                }}
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600"
               >
                 ✕
@@ -408,7 +423,10 @@ export default function EmiCollections({ onToast, worker }) {
 
           <select
             value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
+            onChange={(e) => {
+              setSortBy(e.target.value);
+              setPage(1);
+            }}
             className="rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 focus:border-accent focus:outline-none"
           >
             <option value="nextDue">Sort by: Next Due Date</option>
@@ -624,6 +642,19 @@ export default function EmiCollections({ onToast, worker }) {
             </table>
           </div>
         </div>
+      )}
+
+      {/* Pagination Controls */}
+      {pagination && (
+        <Pagination
+          pagination={pagination}
+          page={page}
+          limit={limit}
+          onPageChange={setPage}
+          onLimitChange={setLimit}
+          limitOptions={[5, 10, 20, 50]}
+          itemLabel="loans"
+        />
       )}
 
       {/* ========================================================================= */}

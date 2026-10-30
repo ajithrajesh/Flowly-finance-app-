@@ -1056,6 +1056,25 @@ export const getFDWorkerQueue = async (req, res) => {
 
     const filter = status === "all" ? {} : { status };
 
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    if (search) {
+      const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(safe, "i");
+      const matchingUsers = await User.find({
+        $or: [{ name: regex }, { email: regex }, { phone: regex }],
+      }).select("_id").lean();
+      const userIds = matchingUsers.map((u) => u._id);
+
+      filter.$and = filter.$and || [];
+      filter.$and.push({
+        $or: [
+          { user: { $in: userIds } },
+          { fdNumber: regex },
+          { sourceAccountNumber: regex },
+        ],
+      });
+    }
+
     const [deposits, total] = await Promise.all([
       FixedDeposit.find(filter)
         .sort({ createdAt: 1 })

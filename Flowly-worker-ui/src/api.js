@@ -51,6 +51,31 @@ export function clearSession() {
   localStorage.removeItem(WORKER_KEY);
 }
 
+/**
+ * Resolves a document URL (relative /uploads, absolute, blob) and automatically
+ * appends worker authentication token for previewing and downloading secure documents.
+ */
+export function resolveDocUrl(rawUrl) {
+  if (!rawUrl) return '';
+  let url = String(rawUrl).trim();
+  if (url.startsWith('blob:') || url.startsWith('data:')) {
+    return url;
+  }
+  const base = (SOCKET_BASE || API_BASE.replace(/\/api\/?$/, '')).replace(/\/+$/, '');
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    const cleanPath = url.startsWith('/') ? url : `/${url}`;
+    url = `${base}${cleanPath}`;
+  }
+  const token = getToken();
+  if (token && (url.includes('/uploads/') || url.includes('/api/documents/') || url.startsWith(base))) {
+    if (!url.includes('token=')) {
+      const sep = url.includes('?') ? '&' : '?';
+      url = `${url}${sep}token=${encodeURIComponent(token)}`;
+    }
+  }
+  return url;
+}
+
 // ---------------------------------------------------------------------
 // Low-level fetch wrapper
 // ---------------------------------------------------------------------
@@ -242,6 +267,21 @@ function mapKycRecord(record) {
     ? Math.max(0, Math.floor((Date.now() - submittedDate.getTime()) / (1000 * 60 * 60 * 24)))
     : null;
 
+  const session = record.videoKycSession;
+  const isVideoVerified =
+    record.videoKycVerified !== undefined
+      ? Boolean(record.videoKycVerified)
+      : Boolean(
+          session &&
+            typeof session === 'object' &&
+            session.status === 'completed' &&
+            session.checklist?.faceVerified &&
+            session.checklist?.documentVerified &&
+            session.checklist?.livenessPassed &&
+            session.recordingConsent?.given &&
+            Boolean(session.recording?.url || session.recording?.uploadedAt)
+        );
+
   return {
     id: record._id,
     userId: record.user?._id,
@@ -257,9 +297,17 @@ function mapKycRecord(record) {
     idType: record.idType,
     idNumber: record.idNumber,
     documentUrl: record.document?.fileUrl || record.documentUrl || '',
-    panUrl: record.panUrl || '',
-    aadhaarUrl: record.aadhaarUrl || '',
-    selfieUrl: record.selfieUrl || '',
+    panUrl:
+      record.panDocument?.fileUrl ||
+      record.panUrl ||
+      (record.idType === 'pan' ? (record.document?.fileUrl || record.documentUrl) : '') ||
+      '',
+    aadhaarUrl:
+      record.aadhaarDocument?.fileUrl ||
+      record.aadhaarUrl ||
+      (record.idType === 'aadhaar' ? (record.document?.fileUrl || record.documentUrl) : '') ||
+      '',
+    selfieUrl: record.selfieDocument?.fileUrl || record.selfieUrl || '',
     rejectionReason: record.rejectionReason || '',
     // OCR check of the uploaded ID image — advisory only, from services/ocrService.js
     ocr: {
@@ -272,9 +320,19 @@ function mapKycRecord(record) {
       reason: record.ocr?.reason || '',
     },
     // Video KYC (face / document / liveness / recording)
-    videoKycStatus: record.videoKycStatus || 'not_scheduled',
-    videoKycSessionId:
-      record.videoKycSession?._id || record.videoKycSession || null,
+    videoKycStatus: record.videoKycStatus || session?.status || 'not_scheduled',
+    videoKycSessionId: session?._id || session || null,
+    videoKycSession: session,
+    videoKycVerified: isVideoVerified,
+    videoKycEvaluation: record.videoKycEvaluation || null,
+    videoKycChecklist: {
+      faceVerified: session?.checklist?.faceVerified === true,
+      documentVerified: session?.checklist?.documentVerified === true,
+      livenessPassed: session?.checklist?.livenessPassed === true,
+      remarks: session?.checklist?.remarks || '',
+    },
+    videoKycRecordingConsent: session?.recordingConsent?.given === true,
+    videoKycRecordingUrl: session?.recording?.url || '',
   };
 }
 
@@ -428,10 +486,18 @@ export async function joinVideoKycSession(id) {
   return request(`/video-kyc/sessions/${id}/join`, { method: 'POST' });
 }
 
-export async function updateVideoKycChecklist(id, { faceVerified, documentVerified, livenessPassed, remarks }) {
+export async function updateVideoKycChecklist(id, payload) {
   const data = await request(`/video-kyc/sessions/${id}/checklist`, {
     method: 'PUT',
-    body: { faceVerified, documentVerified, livenessPassed, remarks },
+    body: payload,
+  });
+  return data;
+}
+
+export async function updateKycVideoChecklist(kycId, payload) {
+  const data = await request(`/kyc/${kycId}/video-checklist`, {
+    method: 'PUT',
+    body: payload,
   });
   return data.data;
 }
@@ -464,13 +530,15 @@ export async function endVideoKycSession(id) {
 // Worker Loan Processing Endpoints
 // ---------------------------------------------------------------------
 
-export async function fetchLoanApplications({ status, search } = {}) {
+export async function fetchLoanApplications({ status, search, page = 1, limit = 10 } = {}) {
   const params = new URLSearchParams();
+  if (page) params.set('page', page);
+  if (limit) params.set('limit', limit);
   if (status) params.set('status', status);
   if (search) params.set('search', search);
 
   const data = await request(`/loans/applications?${params.toString()}`);
-  return data.applications || [];
+  return data;
 }
 
 export async function fetchLoanDetail(id) {
@@ -516,8 +584,11 @@ export async function disburseLoan(id) {
 // Worker Repayment & EMI Endpoints
 // ---------------------------------------------------------------------
 
-export async function fetchCollectionsOverview({ status, search } = {}) {
+export async function fetchCollectionsOverview({ status, search, page = 1, limit = 10, sortBy = 'nextDue' } = {}) {
   const params = new URLSearchParams();
+  if (page) params.set('page', page);
+  if (limit) params.set('limit', limit);
+  if (sortBy) params.set('sortBy', sortBy);
   if (status && status !== 'all') params.append('status', status);
   if (search) params.append('search', search);
   const query = params.toString() ? `?${params.toString()}` : '';
@@ -530,9 +601,10 @@ export async function fetchLoanSchedule(loanId) {
   return data.loan;
 }
 
-export async function fetchOverdueLoans() {
-  const data = await request('/repayments/overdue');
-  return data.loans || [];
+export async function fetchOverdueLoans({ page = 1, limit = 10 } = {}) {
+  const params = new URLSearchParams({ page, limit });
+  const data = await request(`/repayments/overdue?${params.toString()}`);
+  return data;
 }
 
 export async function markEmiPaidManually(loanId, installmentNo, { amountPaid, note, paymentMethod, receiptNumber } = {}) {
@@ -592,9 +664,10 @@ export async function toggleFdSchemeActive(id) {
 // FD Review Queue & Decision Desk (Worker/Admin)
 // ---------------------------------------------------------------------
 
-export async function fetchFdQueue({ page = 1, limit = 20, status = 'pending' } = {}) {
+export async function fetchFdQueue({ page = 1, limit = 10, status = 'pending', search = '' } = {}) {
   const params = new URLSearchParams({ page, limit });
   if (status) params.set('status', status);
+  if (search) params.set('search', search);
   const data = await request(`/deposits/fd/queue?${params.toString()}`);
   return data;
 }

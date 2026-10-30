@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
+import Pagination from './Pagination';
 
 export default function CashDeposit({ onToast }) {
   // Search & account selection state
@@ -24,23 +25,36 @@ export default function CashDeposit({ onToast }) {
   // Recent deposits list
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
+  const [pagination, setPagination] = useState(null);
 
-  const loadDepositHistory = useCallback(async () => {
+  const loadDepositHistory = useCallback(async (p = 1, l = 10) => {
     setHistoryLoading(true);
     try {
-      const data = await api.fetchCashDeposits({ page: 1, limit: 20 });
+      const data = await api.fetchCashDeposits({ page: p, limit: l });
       setHistory(data?.deposits || []);
+      setPagination(
+        data?.pagination || {
+          total: data?.total || 0,
+          page: p,
+          limit: l,
+          totalPages: Math.max(1, Math.ceil((data?.total || 0) / l)),
+          hasPrevPage: p > 1,
+          hasNextPage: p * l < (data?.total || 0),
+        }
+      );
     } catch (err) {
       console.error('Failed to load deposit history:', err);
       if (onToast) onToast(err.message || 'Failed to load deposit history');
     } finally {
       setHistoryLoading(false);
     }
-  }, []);
+  }, [onToast]);
 
   useEffect(() => {
-    loadDepositHistory();
-  }, [loadDepositHistory]);
+    loadDepositHistory(page, limit);
+  }, [page, limit, loadDepositHistory]);
 
   const handleSearch = async (e) => {
     if (e) e.preventDefault();
@@ -127,7 +141,8 @@ export default function CashDeposit({ onToast }) {
         if (onToast) onToast(res?.message || 'Cash deposit processed successfully!');
         // Reset deposit form
         handleClearSelection();
-        await loadDepositHistory();
+        setPage(1);
+        await loadDepositHistory(1, limit);
       } else {
         setFormError(res?.message || 'Cash deposit processed, but receipt details were missing.');
       }
@@ -400,7 +415,7 @@ export default function CashDeposit({ onToast }) {
           <div className="panel">
             <div className="panel-head">
               <span className="panel-title">Recent Branch Cash Deposits Log</span>
-              <button onClick={loadDepositHistory} className="panel-link">
+              <button onClick={() => loadDepositHistory(page, limit)} className="panel-link">
                 Refresh
               </button>
             </div>
@@ -412,50 +427,64 @@ export default function CashDeposit({ onToast }) {
                 No cash deposits recorded yet today.
               </div>
             ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Receipt # / Account</th>
-                      <th>Amount</th>
-                      <th>Status</th>
-                      <th style={{ textAlign: 'right' }}>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {history.map((dep) => (
-                      <tr key={dep.receiptNumber || dep.transactionId}>
-                        <td>
-                          <div style={{ fontWeight: 700, fontSize: '11.5px', color: '#5c187b' }}>
-                            {dep.receiptNumber}
-                          </div>
-                          <div style={{ fontSize: '10px', color: '#8b8880' }}>
-                            Acc: {dep.account?.accountNumber || dep.accountNumber || '—'}
-                          </div>
-                        </td>
-                        <td>
-                          <div style={{ fontWeight: 700, color: '#2e7a22', fontSize: '12px' }}>
-                            +₹{dep.amount?.toLocaleString('en-IN')}
-                          </div>
-                          <div style={{ fontSize: '9.5px', color: '#8b8880' }}>
-                            {new Date(dep.completedAt || dep.timestamp || dep.initiatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </div>
-                        </td>
-                        <td>
-                          <span className="badge badge-green">COMPLETED</span>
-                        </td>
-                        <td style={{ textAlign: 'right' }}>
-                          <button
-                            onClick={() => handleViewReceipt(dep.receiptNumber)}
-                            className="btn-outline btn-sm"
-                          >
-                            View Receipt
-                          </button>
-                        </td>
+              <div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Receipt # / Account</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th style={{ textAlign: 'right' }}>Action</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {history.map((dep) => (
+                        <tr key={dep.receiptNumber || dep.transactionId}>
+                          <td>
+                            <div style={{ fontWeight: 700, fontSize: '11.5px', color: '#5c187b' }}>
+                              {dep.receiptNumber}
+                            </div>
+                            <div style={{ fontSize: '10px', color: '#8b8880' }}>
+                              Acc: {dep.account?.accountNumber || dep.accountNumber || '—'}
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ fontWeight: 700, color: '#2e7a22', fontSize: '12px' }}>
+                              +₹{dep.amount?.toLocaleString('en-IN')}
+                            </div>
+                            <div style={{ fontSize: '9.5px', color: '#8b8880' }}>
+                              {new Date(dep.completedAt || dep.timestamp || dep.initiatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </td>
+                          <td>
+                            <span className="badge badge-green">COMPLETED</span>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <button
+                              onClick={() => handleViewReceipt(dep.receiptNumber)}
+                              className="btn-outline btn-sm"
+                            >
+                              View Receipt
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {pagination && (
+                  <Pagination
+                    pagination={pagination}
+                    page={page}
+                    limit={limit}
+                    onPageChange={setPage}
+                    onLimitChange={setLimit}
+                    limitOptions={[5, 10, 20]}
+                    itemLabel="deposits"
+                    compact={true}
+                  />
+                )}
               </div>
             )}
           </div>

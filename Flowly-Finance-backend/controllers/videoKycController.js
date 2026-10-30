@@ -480,6 +480,8 @@ export const joinSession = async (req, res) => {
         status: session.status,
         scheduledAt: session.scheduledAt,
         recordingConsentGiven: session.recordingConsent?.given === true,
+        checklist: session.checklist || { faceVerified: false, documentVerified: false, livenessPassed: false, remarks: "" },
+        recording: session.recording || {},
       },
     });
   } catch (err) {
@@ -528,28 +530,61 @@ export const updateChecklist = async (req, res) => {
     const session = await loadOfficerSession(req, res);
     if (!session) return;
 
-    if (!["in_progress", "completed"].includes(session.status)) {
+    if (!["scheduled", "in_progress", "completed"].includes(session.status)) {
       return res.status(409).json({
         success: false,
-        message: "The checklist can only be filled once the call has started",
+        message: `Checklist cannot be updated when session is ${session.status}`,
       });
+    }
+
+    if (!session.checklist) {
+      session.checklist = { faceVerified: false, documentVerified: false, livenessPassed: false, remarks: "" };
     }
 
     for (const key of ["faceVerified", "documentVerified", "livenessPassed"]) {
       if (req.body[key] !== undefined) {
-        if (typeof req.body[key] !== "boolean") {
-          return res.status(422).json({ success: false, message: `${key} must be true or false` });
-        }
-        session.checklist[key] = req.body[key];
+        session.checklist[key] = Boolean(req.body[key]);
       }
     }
     if (req.body.remarks !== undefined) {
       session.checklist.remarks = String(req.body.remarks).slice(0, 500);
     }
 
-    await session.save();
+    if (req.body.recordingConsentGiven !== undefined) {
+      session.recordingConsent = {
+        given: Boolean(req.body.recordingConsentGiven),
+        at: new Date(),
+        ip: req.ip || "officer_verified",
+      };
+    }
 
-    return res.status(200).json({ success: true, data: session.checklist });
+    if (req.body.recordingUrl) {
+      session.recording = {
+        ...session.recording,
+        url: String(req.body.recordingUrl).trim(),
+        uploadedAt: session.recording?.uploadedAt || new Date(),
+      };
+    }
+
+    if (req.body.status && ["scheduled", "in_progress", "completed"].includes(req.body.status)) {
+      session.status = req.body.status;
+      if (req.body.status === "completed" && !session.endedAt) {
+        session.endedAt = new Date();
+      }
+    }
+
+    await session.save();
+    await syncKycVideoStatus(session);
+
+    const evaluation = evaluateVideoKyc(session);
+
+    return res.status(200).json({
+      success: true,
+      data: session.checklist,
+      session,
+      readyForDecision: evaluation.passed,
+      missing: evaluation.missing,
+    });
   } catch (err) {
     console.error("updateChecklist error:", err);
     return res.status(500).json({ success: false, message: "Failed to update checklist" });

@@ -5,9 +5,12 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
 import { sendOTPEmail, sendAccountLockoutEmail } from "../utils/mailer.js";
+import cloudinary, { isCloudinaryConfigured } from "../config/cloudinary.js";
+import { notifyAdmins } from "../services/notificationService.js";
+import { getJwtSecret } from "../config/jwt.js";
 
-const generateToken = (user) => {
-  const secret = process.env.JWT_SECRET || "flowly_secret_key_12345";
+export const generateToken = (user) => {
+  const secret = getJwtSecret();
   return jwt.sign(
     {
       id: user._id,
@@ -931,6 +934,8 @@ export const getGoogleClientId = (req, res) => {
 
 /**
  * Worker / Internal Staff Registration
+ * Restricts all worker creation to authorized administrators only.
+ * Enforces backend role validation and prevents workers from assigning or promoting admin roles.
  */
 export const registerWorker = async (req, res) => {
   try {
@@ -938,41 +943,124 @@ export const registerWorker = async (req, res) => {
 
     if (!name || !email || !password || !phone) {
       return res.status(400).json({
+        success: false,
         message: "Please provide name, email, phone, and password",
       });
     }
 
-    const workerRole = role && ["worker", "admin", "support"].includes(role) ? role : "worker";
+    // 1. Backend role validation: validate against whitelist
+    const ALLOWED_STAFF_ROLES = ["worker", "admin", "support"];
+    let targetRole = "worker";
+    if (role !== undefined) {
+      const normalizedRole = String(role).toLowerCase().trim();
+      if (!ALLOWED_STAFF_ROLES.includes(normalizedRole)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid role specified. Allowable staff roles are: ${ALLOWED_STAFF_ROLES.join(", ")}.`,
+        });
+      }
+      targetRole = normalizedRole;
+    }
+
+    // Validate workerRole subrole if provided
+    const ALLOWED_WORKER_SUBROLES = ["general", "support"];
+    if (req.body.workerRole !== undefined) {
+      const normalizedWorkerRole = String(req.body.workerRole).toLowerCase().trim();
+      if (!ALLOWED_WORKER_SUBROLES.includes(normalizedWorkerRole)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid workerRole specified. Allowable worker sub-roles are: ${ALLOWED_WORKER_SUBROLES.join(", ")}.`,
+        });
+      }
+    }
+
+    // Validate status if provided
+    const ALLOWED_STATUSES = ["active", "inactive", "blocked"];
+    if (req.body.status !== undefined) {
+      const normalizedStatus = String(req.body.status).toLowerCase().trim();
+      if (!ALLOWED_STATUSES.includes(normalizedStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status specified. Allowable statuses are: ${ALLOWED_STATUSES.join(", ")}.`,
+        });
+      }
+    }
+
+    // 2. Enforce admin authorization: restrict worker creation to authorized administrators only
+    const isAuthorizedAdmin = req.user && req.user.role === "admin";
+    if (!isAuthorizedAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Administrator access is required to register or create worker accounts.",
+      });
+    }
+
+    // 3. Prevent non-admins / workers from assigning admin roles
+    if (targetRole === "admin" && !isAuthorizedAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Workers cannot assign or promote admin roles. Administrator access is required.",
+      });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const cleanPhone = String(phone).trim();
 
     const existingUser = await User.findOne({
-      $or: [{ email: email.toLowerCase() }, { phone }],
+      $or: [{ email: cleanEmail }, { phone: cleanPhone }],
     });
 
     if (existingUser) {
       return res.status(400).json({
+        success: false,
         message: "Worker with this email or phone already exists",
       });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    const accountStatus = req.body.status && ALLOWED_STATUSES.includes(String(req.body.status).toLowerCase().trim())
+      ? String(req.body.status).toLowerCase().trim()
+      : "active";
+    const kycStatus = "verified";
+    const subRole = targetRole === "support" ? "support" : (req.body.workerRole || "general");
+    const rotationOrder = req.body.rotationOrder || 0;
+
     const worker = await User.create({
-      name,
-      email: email.toLowerCase(),
-      phone,
+      name: name.trim(),
+      email: cleanEmail,
+      phone: cleanPhone,
       password: hashedPassword,
-      role: workerRole,
-      workerRole: req.body.workerRole || (workerRole === "support" ? "support" : "general"),
-      rotationOrder: req.body.rotationOrder || 0,
-      kycStatus: "verified",
-      status: "active",
+      role: targetRole,
+      workerRole: subRole,
+      rotationOrder,
+      kycStatus,
+      status: accountStatus,
     });
 
-    const token = generateToken(worker);
+    // Notify administrators of staff registration
+    try {
+      await notifyAdmins({
+        type: "account",
+        title: "Staff Member Registered by Admin",
+        message: `Administrator ${req.user?.name || "Admin"} registered ${worker.name} (${worker.email}) with role '${targetRole}'.`,
+        meta: { workerId: worker._id, role: targetRole, status: accountStatus },
+      });
+    } catch (notifErr) {
+      console.warn("Failed to notify admins of worker registration:", notifErr.message);
+    }
+
+    // Issue authentication token only if account is active
+    let token = null;
+    if (accountStatus === "active") {
+      token = generateToken(worker);
+    }
 
     return res.status(201).json({
-      message: "Worker account created successfully",
+      success: true,
+      message: `${targetRole === "admin" ? "Administrator" : targetRole === "support" ? "Support Team" : "Worker"} account created successfully`,
       token,
+      requiresActivation: accountStatus !== "active",
       worker: {
         id: worker._id,
         name: worker.name,
@@ -981,10 +1069,13 @@ export const registerWorker = async (req, res) => {
         role: worker.role,
         workerRole: worker.workerRole,
         rotationOrder: worker.rotationOrder,
+        status: worker.status,
       },
     });
   } catch (error) {
+    console.error("Worker registration error:", error);
     return res.status(500).json({
+      success: false,
       message: "Worker registration failed",
       error: error.message,
     });
@@ -1009,6 +1100,18 @@ export const loginWorker = async (req, res) => {
     if (!worker || (!["worker", "admin", "support"].includes(worker.role) && worker.workerRole !== "support")) {
       return res.status(401).json({
         message: "Invalid worker credentials or account unauthorized",
+      });
+    }
+
+    // Enforce account activation rules (must be active to log in)
+    if (worker.status !== "active") {
+      return res.status(403).json({
+        success: false,
+        message: worker.status === "blocked"
+          ? "Worker account has been suspended or blocked by an administrator."
+          : "Worker account is inactive or pending administrator activation. Please contact an administrator.",
+        status: worker.status,
+        requiresActivation: worker.status !== "blocked",
       });
     }
 
@@ -1108,6 +1211,195 @@ export const getMe = async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       message: "Failed to fetch user profile",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Update Current Authenticated User Profile
+ */
+export const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const {
+      name,
+      phone,
+      address,
+      personalDetails,
+      contactDetails,
+      profileImage,
+      avatar,
+    } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    if (name && typeof name === "string") {
+      const trimmed = name.trim();
+      if (trimmed.length < 2) {
+        return res.status(400).json({ success: false, message: "Name must be at least 2 characters" });
+      }
+      user.name = trimmed;
+    }
+
+    if (phone !== undefined) {
+      const trimmedPhone = String(phone).trim();
+      if (trimmedPhone) {
+        if (trimmedPhone !== user.phone) {
+          const existingPhone = await User.findOne({ phone: trimmedPhone, _id: { $ne: userId } });
+          if (existingPhone) {
+            return res.status(400).json({ success: false, message: "Phone number is already associated with another account" });
+          }
+          user.phone = trimmedPhone;
+        }
+      } else {
+        user.phone = undefined;
+      }
+    }
+
+    if (address !== undefined) {
+      user.address = String(address).trim();
+    }
+
+    if (personalDetails && typeof personalDetails === "object") {
+      user.personalDetails = {
+        ...(user.personalDetails || {}),
+        ...personalDetails,
+      };
+    }
+
+    if (contactDetails && typeof contactDetails === "object") {
+      user.contactDetails = {
+        ...(user.contactDetails || {}),
+        ...contactDetails,
+      };
+    }
+
+    const img = profileImage !== undefined ? profileImage : avatar;
+    if (img !== undefined) {
+      user.profileImage = img;
+      user.avatar = img;
+    }
+
+    await user.save();
+
+    const account = await Account.findOne({ user: userId });
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user,
+      account: account || null,
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update profile",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Upload & Update Profile Avatar Image
+ */
+export const uploadAvatar = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ success: false, message: "Please select an image file to upload" });
+    }
+
+    let imageUrl = "";
+
+    if (isCloudinaryConfigured()) {
+      try {
+        const root = process.env.CLOUDINARY_FOLDER || "flowly";
+        const result = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            {
+              folder: `${root}/avatars/${userId}`,
+              public_id: `avatar-${Date.now()}`,
+              resource_type: "image",
+              type: "upload",
+              overwrite: true,
+            },
+            (err, res) => (err ? reject(err) : resolve(res))
+          );
+          stream.end(file.buffer);
+        });
+        imageUrl = result.secure_url;
+      } catch (cloudErr) {
+        console.warn("Cloudinary avatar upload fallback to data URI:", cloudErr.message);
+        imageUrl = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
+      }
+    } else {
+      imageUrl = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    user.profileImage = imageUrl;
+    user.avatar = imageUrl;
+    await user.save();
+
+    const account = await Account.findOne({ user: userId });
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile photo updated successfully",
+      profileImage: imageUrl,
+      avatar: imageUrl,
+      user,
+      account: account || null,
+    });
+  } catch (error) {
+    console.error("Avatar upload error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to upload avatar",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Delete Profile Avatar
+ */
+export const deleteAvatar = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    user.profileImage = "";
+    user.avatar = "";
+    await user.save();
+
+    const account = await Account.findOne({ user: userId });
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile photo removed successfully",
+      user,
+      account: account || null,
+    });
+  } catch (error) {
+    console.error("Delete avatar error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to remove profile photo",
       error: error.message,
     });
   }

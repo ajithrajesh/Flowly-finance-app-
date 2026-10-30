@@ -1,3 +1,5 @@
+import crypto from "crypto";
+import mongoose from "mongoose";
 import KYC from "../models/KYC.js";
 import User from "../models/User.js";
 import Document from "../models/Document.js";
@@ -14,13 +16,16 @@ import {
 } from "../services/ocrService.js";
 
 // Every Document attached to a KYC submission (ID doc, PAN, Aadhaar, selfie)
-const kycDocumentIds = (record) =>
-  [
-    record.document,
-    record.panDocument,
-    record.aadhaarDocument,
-    record.selfieDocument,
+const kycDocumentIds = (record) => {
+  if (!record) return [];
+  const ids = [
+    record.document?._id || record.document,
+    record.panDocument?._id || record.panDocument,
+    record.aadhaarDocument?._id || record.aadhaarDocument,
+    record.selfieDocument?._id || record.selfieDocument,
   ].filter(Boolean);
+  return [...new Set(ids.map((id) => String(id)))];
+};
 
 const DOCUMENT_POPULATE_FIELDS = "documentType fileUrl uploadedAt verificationStatus";
 
@@ -44,9 +49,14 @@ export const submitKYC = async (req, res) => {
     const legacyFile = files.document?.[0];
 
     // The file that proves the chosen idType
-    const primaryIdFile =
-      legacyFile ||
-      (idType === "pan" ? panFile : idType === "aadhaar" ? aadhaarFile : undefined);
+    let primaryIdFile;
+    if (idType === "pan" && panFile) {
+      primaryIdFile = panFile;
+    } else if (idType === "aadhaar" && aadhaarFile) {
+      primaryIdFile = aadhaarFile;
+    } else {
+      primaryIdFile = legacyFile || (idType === "pan" ? panFile : aadhaarFile);
+    }
 
     if (!primaryIdFile) {
       return res.status(400).json({
@@ -59,8 +69,9 @@ export const submitKYC = async (req, res) => {
     // ---- 1. Upload everything to Cloudinary first --------------------------
     // Nothing is written to MongoDB until every upload has succeeded.
     const userId = String(req.user._id);
+    const primaryDocType = ["pan", "aadhaar"].includes(idType) ? idType : (idType || "aadhaar");
     const toUpload = [
-      { key: "primary", file: primaryIdFile, docType: idType === "pan" ? "pan" : "aadhaar" },
+      { key: "primary", file: primaryIdFile, docType: primaryDocType },
     ];
     // Selfie is optional - it is uploaded only if the client sends one
     if (selfieFile) {
@@ -79,6 +90,8 @@ export const submitKYC = async (req, res) => {
         uploadKycFile(item.file.buffer, {
           userId,
           kind: item.key === "primary" ? `id-${item.docType}` : item.key,
+          originalName: item.file.originalname,
+          mimeType: item.file.mimetype,
         })
       )
     );
@@ -90,7 +103,7 @@ export const submitKYC = async (req, res) => {
     const failed = results.find((r) => r.status === "rejected");
     if (failed) {
       await Promise.all(uploaded.map(deleteKycFile));
-      console.error("Cloudinary upload failed:", failed.reason);
+      console.error("KYC document upload failed:", failed.reason);
       return res.status(502).json({
         message: "Could not upload your documents. Please try again.",
         error: failed.reason?.message,
@@ -106,11 +119,17 @@ export const submitKYC = async (req, res) => {
         documentType: toUpload[i].docType,
         fileUrl: asset.url,
         publicId: asset.publicId,
-        resourceType: asset.resourceType,
-        storageProvider: "cloudinary",
-        verificationStatus: "pending",
+        resourceType: asset.resourceType || "image",
+        storageProvider: asset.storageProvider || "cloudinary",
+        verificationStatus: "under_verification",
       });
     }
+
+    // Keep existing documents in sync with submission review state
+    await Document.updateMany(
+      { user: req.user._id, documentType: { $in: ["aadhaar", "pan", "selfie", "document"] } },
+      { verificationStatus: "under_verification" }
+    );
 
     const documentRecord = docs.primary;
     const documentUrl = documentRecord.fileUrl;
@@ -241,16 +260,24 @@ export const getKYCStatus = async (req, res) => {
       .populate("panDocument")
       .populate("aadhaarDocument")
       .populate("selfieDocument")
-      .populate("videoKycSession", "status scheduledAt durationMinutes");
+      .populate("videoKycSession");
 
     let account = await Account.findOne({ user: userId });
     if (!account && req.user.kycStatus === "verified") {
       account = await createBankAccountForUser(userId);
     }
 
+    let kycData = null;
+    if (kyc) {
+      kycData = kyc.toObject ? kyc.toObject() : { ...kyc };
+      const evaluation = evaluateVideoKyc(kycData.videoKycSession);
+      kycData.videoKycVerified = evaluation.passed;
+      kycData.videoKycEvaluation = evaluation;
+    }
+
     return res.status(200).json({
       kycStatus: req.user.kycStatus,
-      kycDetails: kyc || null,
+      kycDetails: kycData,
       account: account || null,
     });
   } catch (error) {
@@ -280,7 +307,7 @@ export const getKycQueue = async (req, res) => {
         .populate("panDocument", DOCUMENT_POPULATE_FIELDS)
         .populate("aadhaarDocument", DOCUMENT_POPULATE_FIELDS)
         .populate("selfieDocument", DOCUMENT_POPULATE_FIELDS)
-        .populate("videoKycSession", "status scheduledAt officer checklist recording.uploadedAt")
+        .populate("videoKycSession")
         .populate("verifiedBy", "name")
         .sort({ createdAt: 1 })
         .skip((page - 1) * limit)
@@ -288,9 +315,17 @@ export const getKycQueue = async (req, res) => {
       KYC.countDocuments(filter),
     ]);
 
+    const enrichedRecords = records.map((rec) => {
+      const obj = rec.toObject ? rec.toObject() : { ...rec };
+      const evaluation = evaluateVideoKyc(obj.videoKycSession);
+      obj.videoKycVerified = evaluation.passed;
+      obj.videoKycEvaluation = evaluation;
+      return obj;
+    });
+
     return res.status(200).json({
       success: true,
-      data: records,
+      data: enrichedRecords,
       total,
       page,
       limit,
@@ -323,9 +358,22 @@ export const getKycDetail = async (req, res) => {
       .populate("document", "documentType verificationStatus")
       .sort({ createdAt: -1 });
 
+    const obj = record.toObject ? record.toObject() : { ...record };
+    let session = obj.videoKycSession;
+    if (!session && mongoose.isValidObjectId(record._id)) {
+      session = await VideoKycSession.findOne({ kyc: record._id }).sort({ createdAt: -1 });
+      if (session) {
+        obj.videoKycSession = session;
+        obj.videoKycStatus = session.status;
+      }
+    }
+    const evaluation = evaluateVideoKyc(session);
+    obj.videoKycVerified = evaluation.passed;
+    obj.videoKycEvaluation = evaluation;
+
     return res.status(200).json({
       success: true,
-      data: { record, otherSubmissions },
+      data: { record: obj, otherSubmissions },
     });
   } catch (err) {
     console.error("getKycDetail error:", err);
@@ -352,6 +400,12 @@ export const startKycReview = async (req, res) => {
     record.verifiedBy = req.user._id || req.user.id;
     await record.save();
 
+    const docIds = kycDocumentIds(record);
+    await Document.updateMany(
+      { $or: [{ _id: { $in: docIds } }, { user: record.user, documentType: { $in: ["aadhaar", "pan", "selfie", "document"] } }] },
+      { verificationStatus: "under_verification" }
+    );
+
     await User.findByIdAndUpdate(record.user, { kycStatus: "under_verification" });
 
     notifyUser(record.user, {
@@ -370,7 +424,8 @@ export const startKycReview = async (req, res) => {
 
 export const approveKyc = async (req, res) => {
   try {
-    const record = await KYC.findById(req.params.id);
+    const record = await KYC.findById(req.params.id)
+      .populate("videoKycSession");
 
     if (!record) {
       return res.status(404).json({ success: false, message: "KYC record not found" });
@@ -380,21 +435,82 @@ export const approveKyc = async (req, res) => {
       return res.status(409).json({ success: false, message: "Record is already verified" });
     }
 
-    // Final approval needs a completed video KYC (face, document, liveness,
-    // consent and recording). Set REQUIRE_VIDEO_KYC=false to skip this check.
-    if (process.env.REQUIRE_VIDEO_KYC !== "false") {
-      const session = record.videoKycSession
-        ? await VideoKycSession.findById(record.videoKycSession)
-        : null;
-      const evaluation = evaluateVideoKyc(session);
+    // ---- MANDATORY KYC CHECKS -----------------------------------------------
+    // 1. Mandatory Identity Document (Aadhaar or primary government ID)
+    const hasAadhaarOrId = Boolean(
+      record.aadhaarDocument ||
+      record.aadhaarUrl ||
+      record.document ||
+      record.documentUrl
+    );
+    if (!hasAadhaarOrId) {
+      return res.status(422).json({
+        success: false,
+        message: "Cannot approve KYC: Mandatory Aadhaar/Identity document is missing.",
+        missingCheck: "aadhaar_document",
+      });
+    }
 
-      if (!evaluation.passed) {
-        return res.status(409).json({
-          success: false,
-          message: "Video KYC is not complete, so this KYC cannot be approved yet.",
-          missing: evaluation.missing,
-        });
-      }
+    // 2. Mandatory PAN Document
+    const hasPan = Boolean(
+      record.panDocument ||
+      record.panUrl ||
+      (record.idType === "pan" && (record.document || record.documentUrl))
+    );
+    if (!hasPan) {
+      return res.status(422).json({
+        success: false,
+        message: "Cannot approve KYC: Mandatory PAN card document is missing.",
+        missingCheck: "pan_document",
+      });
+    }
+
+    // 3. Mandatory Live Selfie photo
+    const hasSelfie = Boolean(record.selfieDocument || record.selfieUrl);
+    if (!hasSelfie) {
+      return res.status(422).json({
+        success: false,
+        message: "Cannot approve KYC: Mandatory live selfie photo is missing.",
+        missingCheck: "selfie_photo",
+      });
+    }
+
+    // 4. Mandatory ID Number & Address
+    if (!record.idNumber || !String(record.idNumber).trim()) {
+      return res.status(422).json({
+        success: false,
+        message: "Cannot approve KYC: ID number is missing or invalid.",
+        missingCheck: "id_number",
+      });
+    }
+    if (!record.address || !String(record.address).trim()) {
+      return res.status(422).json({
+        success: false,
+        message: "Cannot approve KYC: Customer residential address is missing.",
+        missingCheck: "address",
+      });
+    }
+
+    // 5. Mandatory Video KYC Verification
+    // Video KYC must be completed AND verified (face verified, document verified, liveness passed, consent given, and recording stored).
+    let session = record.videoKycSession
+      ? (typeof record.videoKycSession === "object" && record.videoKycSession.checklist
+          ? record.videoKycSession
+          : await VideoKycSession.findById(record.videoKycSession))
+      : null;
+
+    if (!session && mongoose.isValidObjectId(record._id)) {
+      session = await VideoKycSession.findOne({ kyc: record._id }).sort({ createdAt: -1 });
+    }
+    const evaluation = evaluateVideoKyc(session);
+
+    if (!evaluation.passed) {
+      return res.status(422).json({
+        success: false,
+        message: "Cannot approve KYC: Video KYC verification is incomplete. All mandatory checks must pass.",
+        missing: evaluation.missing,
+        missingCheck: "video_kyc",
+      });
     }
 
     // Create the bank account FIRST. Only once this succeeds do we flip the
@@ -420,8 +536,9 @@ export const approveKyc = async (req, res) => {
     record.resubmissionRequested = false;
     await record.save();
 
+    const docIds = kycDocumentIds(record);
     await Document.updateMany(
-      { _id: { $in: kycDocumentIds(record) } },
+      { $or: [{ _id: { $in: docIds } }, { user: record.user, documentType: { $in: ["aadhaar", "pan", "selfie", "document"] } }] },
       { verificationStatus: "verified" }
     );
 
@@ -478,8 +595,9 @@ export const rejectKyc = async (req, res) => {
     record.resubmissionRequested = requestResubmission;
     await record.save();
 
+    const docIds = kycDocumentIds(record);
     await Document.updateMany(
-      { _id: { $in: kycDocumentIds(record) } },
+      { $or: [{ _id: { $in: docIds } }, { user: record.user, documentType: { $in: ["aadhaar", "pan", "selfie", "document"] } }] },
       { verificationStatus: "rejected" }
     );
 
@@ -547,5 +665,98 @@ export const retryKycOcr = async (req, res) => {
   } catch (err) {
     console.error("retryKycOcr error:", err);
     return res.status(500).json({ success: false, message: "Failed to start OCR" });
+  }
+};
+
+export const updateKycVideoChecklist = async (req, res) => {
+  try {
+    const record = await KYC.findById(req.params.id);
+    if (!record) {
+      return res.status(404).json({ success: false, message: "KYC record not found" });
+    }
+
+    let session = record.videoKycSession
+      ? await VideoKycSession.findById(record.videoKycSession)
+      : await VideoKycSession.findOne({ kyc: record._id }).sort({ createdAt: -1 });
+
+    if (!session) {
+      // Auto-initialize a session if worker is recording verification ticks
+      session = await VideoKycSession.create({
+        kyc: record._id,
+        customer: record.user,
+        officer: req.user._id || req.user.id,
+        scheduledAt: new Date(),
+        durationMinutes: 30,
+        status: "in_progress",
+        roomId: crypto.randomUUID(),
+        recordingConsent: { given: true, at: new Date(), ip: req.ip || "officer_verified" },
+      });
+      record.videoKycSession = session._id;
+      record.videoKycStatus = session.status;
+    }
+
+    if (!session.checklist) {
+      session.checklist = { faceVerified: false, documentVerified: false, livenessPassed: false, remarks: "" };
+    }
+
+    for (const key of ["faceVerified", "documentVerified", "livenessPassed"]) {
+      if (req.body[key] !== undefined) {
+        session.checklist[key] = Boolean(req.body[key]);
+      }
+    }
+    if (req.body.remarks !== undefined) {
+      session.checklist.remarks = String(req.body.remarks).slice(0, 500);
+    }
+
+    if (req.body.recordingConsentGiven !== undefined) {
+      session.recordingConsent = {
+        given: Boolean(req.body.recordingConsentGiven),
+        at: new Date(),
+        ip: req.ip || "officer_verified",
+      };
+    }
+
+    if (req.body.recordingUrl) {
+      session.recording = {
+        ...session.recording,
+        url: String(req.body.recordingUrl).trim(),
+        uploadedAt: session.recording?.uploadedAt || new Date(),
+      };
+    }
+
+    if (req.body.status && ["scheduled", "in_progress", "completed"].includes(req.body.status)) {
+      session.status = req.body.status;
+      if (req.body.status === "completed" && !session.endedAt) {
+        session.endedAt = new Date();
+      }
+    } else if (
+      req.body.markCompleted ||
+      (session.checklist.faceVerified && session.checklist.documentVerified && session.checklist.livenessPassed)
+    ) {
+      session.status = "completed";
+      if (!session.endedAt) session.endedAt = new Date();
+    }
+
+    await session.save();
+
+    record.videoKycSession = session._id;
+    record.videoKycStatus = session.status;
+    await record.save();
+
+    const evaluation = evaluateVideoKyc(session);
+
+    return res.status(200).json({
+      success: true,
+      message: "Video KYC checklist updated successfully",
+      data: {
+        session,
+        checklist: session.checklist,
+        videoKycVerified: evaluation.passed,
+        videoKycEvaluation: evaluation,
+      },
+    });
+  } catch (err) {
+    console.error("updateKycVideoChecklist error:", err);
+    return res.status(500).json({ success: false, message: "Failed to update Video KYC checklist" });
   }
 };

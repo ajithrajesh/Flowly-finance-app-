@@ -12,8 +12,12 @@ import {
   registerWorker,
   loginWorker,
   getMe,
+  updateProfile,
+  uploadAvatar,
+  deleteAvatar,
 } from "../controllers/authController.js";
-import { protect } from "../middleware/authMiddleware.js";
+import { protect, authorize, optionalAuth } from "../middleware/authMiddleware.js";
+import { uploadAvatarFile } from "../middleware/uploadMiddleware.js";
 
 const router = express.Router();
 
@@ -30,11 +34,15 @@ router.post("/password/reset", resetPassword);
 router.post("/google", googleAuth);
 router.get("/google/client-id", getGoogleClientId);
 
-// Worker / Staff Auth
-router.post("/worker/register", registerWorker);
+// Worker / Staff Auth - Worker creation restricted to authorized administrators
+router.post("/worker/register", protect, authorize("admin"), registerWorker);
 router.post("/worker/login", loginWorker);
 
 // Profile
 router.get("/me", protect, getMe);
+router.put("/profile", protect, updateProfile);
+router.patch("/profile", protect, updateProfile);
+router.post("/profile/avatar", protect, uploadAvatarFile, uploadAvatar);
+router.delete("/profile/avatar", protect, deleteAvatar);
 
 export default router;

@@ -168,25 +168,41 @@ export const confirmStripeTransferManual = async (req, res) => {
 
 export const reportTransfer = async (req, res) => {
   try {
-    const { receiptNumber, notificationId, reason } = req.body;
+    const { receiptNumber, notificationId, reason } = req.body || {};
     const rawReceipt = receiptNumber || req.params?.receiptNumber;
     const cleanReason = (reason && String(reason).trim()) || "Unauthorized / suspicious transfer reported by customer";
 
-    // 1. Locate notification if provided or search by receipt
+    // 1. If notificationId provided, verify it exists and belongs to authenticated customer
     let notification = null;
-    if (notificationId && mongoose.isValidObjectId(notificationId)) {
+    if (notificationId) {
+      if (!mongoose.isValidObjectId(notificationId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid notification ID format.",
+          code: "INVALID_NOTIFICATION_ID",
+        });
+      }
       notification = await Notification.findOne({ _id: notificationId, user: req.user._id });
+      if (!notification) {
+        return res.status(404).json({
+          success: false,
+          message: "Notification not found or does not belong to your account.",
+          code: "NOTIFICATION_NOT_FOUND",
+        });
+      }
     }
 
     const effectiveReceipt = rawReceipt || notification?.meta?.receiptNumber;
     if (!effectiveReceipt && !notification) {
       return res.status(400).json({
+        success: false,
         message: "Receipt number or valid notification ID is required to report a transfer.",
         code: "REPORT_PARAM_REQUIRED",
       });
     }
 
-    const baseReceipt = effectiveReceipt ? String(effectiveReceipt).trim().replace(/-CR$/, "") : null;
+    const cleanReceipt = effectiveReceipt ? String(effectiveReceipt).trim() : null;
+    const baseReceipt = cleanReceipt ? cleanReceipt.replace(/-CR$/, "") : null;
 
     if (!notification && baseReceipt) {
       notification = await Notification.findOne({
@@ -199,7 +215,93 @@ export const reportTransfer = async (req, res) => {
       });
     }
 
-    // 2. Locate and update transaction(s)
+    // 2. Fetch authenticated customer's account
+    const customerAccount = await Account.findOne({ user: req.user._id });
+
+    // 3. Find matching transaction(s) and payment(s)
+    let matchingTxns = [];
+    let matchingPayments = [];
+
+    if (baseReceipt) {
+      [matchingTxns, matchingPayments] = await Promise.all([
+        Transaction.find({
+          $or: [
+            { receiptNumber: baseReceipt },
+            { receiptNumber: `${baseReceipt}-CR` },
+            { receiptNumber: cleanReceipt },
+          ],
+        }),
+        Payment.find({
+          $or: [
+            { receiptNumber: baseReceipt },
+            { receiptNumber: cleanReceipt },
+          ],
+        }),
+      ]);
+    }
+
+    // 4. Verify Ownership: Does the receipt belong to the authenticated customer?
+    const hasTxns = matchingTxns.length > 0;
+    const hasPayments = matchingPayments.length > 0;
+
+    if (hasTxns || hasPayments) {
+      const isOwnerOfTxn = matchingTxns.some(
+        (t) =>
+          String(t.user) === String(req.user._id) ||
+          (customerAccount && String(t.account) === String(customerAccount._id))
+      );
+
+      const isOwnerOfPayment = matchingPayments.some(
+        (p) =>
+          String(p.user) === String(req.user._id) ||
+          (p.destinationUser && String(p.destinationUser) === String(req.user._id)) ||
+          (customerAccount && String(p.account) === String(customerAccount._id)) ||
+          (customerAccount && p.destinationAccount && String(p.destinationAccount) === String(customerAccount._id))
+      );
+
+      if (!isOwnerOfTxn && !isOwnerOfPayment) {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized: Transfer receipt does not belong to your account.",
+          code: "RECEIPT_NOT_OWNED",
+        });
+      }
+    } else if (!notification) {
+      // Receipt does not exist in transactions, payments, or customer notifications
+      return res.status(404).json({
+        success: false,
+        message: `Transfer record for receipt '${cleanReceipt}' not found.`,
+        code: "RECEIPT_NOT_FOUND",
+      });
+    }
+
+    // 5. Status Validation: Prevent re-reporting or reporting already resolved transfers
+    const alreadyReported =
+      matchingTxns.some((t) => t.status === "reported") ||
+      matchingPayments.some((p) => p.paymentStatus === "reported") ||
+      Boolean(notification?.meta?.reported);
+
+    if (alreadyReported) {
+      return res.status(400).json({
+        success: false,
+        message: "This transaction has already been reported and is currently under investigation.",
+        code: "ALREADY_REPORTED",
+      });
+    }
+
+    const alreadyResolved =
+      matchingTxns.some((t) => t.status === "resolved") ||
+      matchingPayments.some((p) => p.paymentStatus === "resolved");
+
+    if (alreadyResolved) {
+      return res.status(400).json({
+        success: false,
+        message: "This transaction report has already been resolved by bank staff.",
+        code: "ALREADY_RESOLVED",
+      });
+    }
+
+    // 6. Ownership and status verified: Safely update matching transactions and payments
     if (baseReceipt) {
       await Transaction.updateMany(
         {
@@ -230,32 +332,60 @@ export const reportTransfer = async (req, res) => {
       );
     }
 
-    // 3. Suspend the customer's account and profile with "Account temporarily suspended."
-    const account = await Account.findOne({ user: req.user._id });
-    if (account) {
-      account.status = "suspended";
-      account.suspensionReason = "Account temporarily suspended.";
-      await account.save();
+    // 7. Check if reported transaction is a DEBIT (money debited/withdrawn/transferred out)
+    let isDebit = req.body?.isDebit;
+    if (isDebit === undefined || isDebit === null) {
+      if (matchingTxns.length > 0) {
+        isDebit = matchingTxns.some((t) => t.type === "debit" || t.direction === "debit");
+      } else if (matchingPayments.length > 0) {
+        isDebit = matchingPayments.some((p) => String(p.user) === String(req.user._id));
+      } else if (notification) {
+        const text = `${notification.title || ''} ${notification.message || ''}`.toLowerCase();
+        const type = String(notification.type || '').toLowerCase();
+        if (type === 'withdrawal') isDebit = true;
+        else if (type === 'deposit') isDebit = false;
+        else {
+          const debitKws = ['debited', 'sent to', 'transfer sent', 'withdrawn', 'paid ₹', 'deducted'];
+          const creditKws = ['credited', 'received from', 'transfer received', 'deposited', 'money added'];
+          const hasDebit = debitKws.some((k) => text.includes(k));
+          const hasCredit = creditKws.some((k) => text.includes(k));
+          if (hasDebit && !hasCredit) isDebit = true;
+          else if (hasCredit && !hasDebit) isDebit = false;
+          else isDebit = true;
+        }
+      } else {
+        isDebit = true;
+      }
     }
 
-    await User.findByIdAndUpdate(req.user._id, {
-      $set: {
-        status: "suspended",
-      },
-    });
+    // 8. If money is debited, BLOCK further money transactions immediately
+    if (isDebit) {
+      if (customerAccount) {
+        customerAccount.status = "suspended";
+        customerAccount.suspensionReason = "Account temporarily suspended due to reported debit transaction.";
+        await customerAccount.save();
+      }
 
-    // 4. Update the notification to indicate it is reported
+      await User.findByIdAndUpdate(req.user._id, {
+        $set: {
+          status: "suspended",
+        },
+      });
+    }
+
+    // 9. Update notification if found
     if (notification) {
       notification.meta = {
         ...(notification.meta || {}),
         reported: true,
         reportedAt: new Date(),
         reportReason: cleanReason,
+        isDebitReport: Boolean(isDebit),
       };
       await notification.save();
     }
 
-    // 5. Create Support Ticket for worker investigation
+    // 10. Create Support Ticket for worker investigation
     let count = await SupportTicket.countDocuments();
     let ticketNumber = `TKT-${String(count + 1).padStart(6, "0")}`;
     while (await SupportTicket.exists({ ticketNumber })) {
@@ -263,8 +393,13 @@ export const reportTransfer = async (req, res) => {
       ticketNumber = `TKT-${String(count + 1).padStart(6, "0")}`;
     }
 
-    const ticketSubject = `[REPORT] Suspicious Transfer Report - ${baseReceipt || "Notification"}`;
-    const ticketDescription = `Customer ${req.user.name} reported a transfer notification.\nReference: ${baseReceipt || "N/A"}\nReason: ${cleanReason}\nAccount Status: Suspended ("Account temporarily suspended.")\nAction Required: Only an authorized worker can resolve the issue and re-enable transactions.`;
+    const ticketSubject = isDebit
+      ? `[REPORT] Suspicious Debit Report - ${baseReceipt || "Notification"}`
+      : `[REPORT] Credited Transaction Inquiry - ${baseReceipt || "Notification"}`;
+
+    const ticketDescription = isDebit
+      ? `Customer ${req.user.name} reported an unauthorized/suspicious debit transaction.\nReference: ${baseReceipt || "N/A"}\nReason: ${cleanReason}\nAccount Status: Suspended ("Account temporarily suspended due to reported debit.")\nAction Required: Investigate reported debit. Only an authorized bank worker can re-enable transactions from the worker desk.`
+      : `Customer ${req.user.name} reported an issue regarding a credited transaction.\nReference: ${baseReceipt || "N/A"}\nReason: ${cleanReason}\nAccount Status: Active\nAction Required: Review customer inquiry regarding credited funds.`;
 
     const ticket = await SupportTicket.create({
       ticketNumber,
@@ -272,61 +407,92 @@ export const reportTransfer = async (req, res) => {
       subject: ticketSubject,
       description: ticketDescription,
       category: "payment",
-      priority: "urgent",
+      priority: isDebit ? "urgent" : "high",
       status: "open",
       messages: [
         {
           sender: req.user._id,
           senderRole: "customer",
-          message: `I have reported transfer ${baseReceipt || ""}: ${cleanReason}. My account has been temporarily suspended. Please investigate and re-enable transactions.`,
+          message: isDebit
+            ? `I have reported debit transaction ${baseReceipt || ""}: ${cleanReason}. My outgoing transactions have been locked for security. Please investigate and re-enable transactions.`
+            : `I have an inquiry regarding credited transaction ${baseReceipt || ""}: ${cleanReason}. Please investigate.`,
           sentAt: new Date(),
         },
       ],
     });
 
-    // Auto-assign to 4-member Support Team in rotational cycle
+    // Auto-assign to Support Team in rotational cycle
     try {
       await assignTicketRotational(ticket);
     } catch (assignErr) {
-      console.error("Rotational ticket assignment error on transfer report:", assignErr.message);
+      console.error("Rotational ticket assignment error on transaction report:", assignErr.message);
     }
 
-    // 6. Notifications
-    await notifyUser(req.user._id, {
-      type: "account",
-      title: "Account Temporarily Suspended",
-      message: `Account temporarily suspended. You reported transfer ${baseReceipt || ""}. For your protection, outgoing transactions have been locked. An authorized bank worker will review and re-enable your account.`,
-      meta: {
-        receiptNumber: baseReceipt,
-        ticketId: ticket._id,
-        ticketNumber: ticket.ticketNumber,
-        accountStatus: "suspended",
-        transactionStatus: "reported",
-      },
-    });
+    // 11. Notifications
+    if (isDebit) {
+      await notifyUser(req.user._id, {
+        type: "account",
+        title: "Money Transactions Temporarily Blocked",
+        message: `Account temporarily suspended. You reported a debit transaction ${baseReceipt ? `(${baseReceipt})` : ""}. For your protection, outgoing money transactions have been blocked. An authorized bank worker will review this report and re-enable transactions from the worker desk.`,
+        meta: {
+          receiptNumber: baseReceipt,
+          ticketId: ticket._id,
+          ticketNumber: ticket.ticketNumber,
+          accountStatus: "suspended",
+          transactionStatus: "reported",
+        },
+      });
 
-    await notifyWorkers({
-      type: "support",
-      title: "URGENT: Transfer Reported & Account Suspended",
-      message: `Customer ${req.user.name} reported transfer ${baseReceipt || ""}. Account suspended ("Account temporarily suspended."). Worker investigation required to resolve and re-enable transactions.`,
-      meta: {
-        ticketId: ticket._id,
-        ticketNumber: ticket.ticketNumber,
-        receiptNumber: baseReceipt,
-        customerId: req.user._id,
-      },
-    });
+      await notifyWorkers({
+        type: "support",
+        title: "URGENT: Debit Reported & Transactions Blocked",
+        message: `Customer ${req.user.name} reported a debit transaction ${baseReceipt ? `(${baseReceipt})` : ""}. Account suspended and outgoing transactions locked. Worker review required to investigate and re-enable transactions.`,
+        meta: {
+          ticketId: ticket._id,
+          ticketNumber: ticket.ticketNumber,
+          receiptNumber: baseReceipt,
+          customerId: req.user._id,
+        },
+      });
+    } else {
+      await notifyUser(req.user._id, {
+        type: "account",
+        title: "Transaction Inquiry Received",
+        message: `Your report regarding credited transaction ${baseReceipt ? `(${baseReceipt})` : ""} has been submitted to support under Ticket #${ticket.ticketNumber}. Your account remains active.`,
+        meta: {
+          receiptNumber: baseReceipt,
+          ticketId: ticket._id,
+          ticketNumber: ticket.ticketNumber,
+          accountStatus: "active",
+        },
+      });
+
+      await notifyWorkers({
+        type: "support",
+        title: "Transaction Inquiry Submitted",
+        message: `Customer ${req.user.name} submitted an inquiry for credited transaction ${baseReceipt ? `(${baseReceipt})` : ""}. Ticket #${ticket.ticketNumber} pending review.`,
+        meta: {
+          ticketId: ticket._id,
+          ticketNumber: ticket.ticketNumber,
+          receiptNumber: baseReceipt,
+          customerId: req.user._id,
+        },
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      message: "Transfer reported successfully. Account temporarily suspended.",
+      message: isDebit
+        ? "Debit transaction reported successfully. Outgoing money transactions have been blocked for your security. A bank worker will review and re-enable transactions."
+        : "Transaction inquiry submitted successfully. Support team will investigate.",
       transactionStatus: "reported",
-      accountStatus: "suspended",
+      accountStatus: isDebit ? "suspended" : (customerAccount?.status || "active"),
       ticket: {
         id: ticket._id,
         ticketNumber: ticket.ticketNumber,
       },
       receiptNumber: baseReceipt,
+      isDebit: Boolean(isDebit),
     });
   } catch (error) {
     return fail(res, error, "Failed to report transfer");
@@ -354,7 +520,7 @@ export const resolveTransferReport = async (req, res) => {
       if (ticket) {
         targetUserId = targetUserId || ticket.user;
         if (!baseReceipt) {
-          const match = ticket.subject.match(/FLWTR-[A-Za-z0-9-]+/i) || ticket.description.match(/FLWTR-[A-Za-z0-9-]+/i);
+          const match = ticket.subject.match(/(FLWTR|WDR|TXN|DEP|REC)-[A-Za-z0-9-]+/i) || ticket.description.match(/(FLWTR|WDR|TXN|DEP|REC)-[A-Za-z0-9-]+/i);
           if (match) baseReceipt = match[0].replace(/-CR$/, "");
         }
       }

@@ -63,7 +63,8 @@ export const notifyUser = async (userId, { title, message, type = "system", meta
     if (!userId) return null;
     let role = recipientRole;
     if (!role) {
-      const user = await User.findById(userId).select("role").lean();
+      const query = User.findById(userId);
+      const user = typeof query?.select === "function" ? await query.select("role").lean() : (await query) || null;
       role = user?.role || "customer";
     }
 
@@ -99,8 +100,9 @@ export const notifyRole = async (role, { title, message, type = "system", meta =
       roleQuery._id = { $ne: excludeUserId };
     }
 
-    const targetUsers = await User.find(roleQuery).select("_id role").lean();
-    if (!targetUsers.length) return [];
+    const query = User.find(roleQuery);
+    const targetUsers = typeof query?.select === "function" ? await query.select("_id role").lean() : (await query) || [];
+    if (!targetUsers || !targetUsers.length) return [];
 
     const now = new Date();
     const docsToInsert = targetUsers.map((u) => ({

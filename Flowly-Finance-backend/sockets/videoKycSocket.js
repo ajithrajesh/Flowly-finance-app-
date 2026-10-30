@@ -10,6 +10,7 @@ import {
   buildLivenessChallenge,
 } from "../utils/videoKycRules.js";
 import { markInProgress, expireIfMissed } from "../services/videoKycService.js";
+import { getJwtSecret } from "../config/jwt.js";
 
 /**
  * WebRTC signaling for Video KYC.
@@ -72,7 +73,14 @@ export const initVideoKycSocket = (httpServer) => {
 
       if (!token) return next(new Error("Unauthorized: no token"));
 
-      const secret = process.env.JWT_SECRET || "flowly_secret_key_12345";
+      let secret;
+      try {
+        secret = getJwtSecret();
+      } catch (configError) {
+        console.error("Socket Auth JWT Configuration Error:", configError.message);
+        return next(new Error("Unauthorized: authentication service misconfigured"));
+      }
+
       const decoded = jwt.verify(token, secret);
       const user = await User.findById(decoded.id).select("-password -pinHash");
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { supportAPI, getErrorMessage } from '../services/api';
+import { supportAPI, transferAPI, getErrorMessage } from '../services/api';
 import {
   LifeBuoy,
   MessageSquare,
@@ -20,7 +21,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   Calendar,
-  Check
+  Check,
+  ShieldAlert
 } from 'lucide-react';
 
 const CATEGORIES = [
@@ -49,6 +51,8 @@ const STATUS_CONFIG = {
 
 export default function HelpPage() {
   const { user } = useAuth();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
 
   // Navigation tab: 'tickets' | 'create'
   const [activeTab, setActiveTab] = useState('tickets');
@@ -77,6 +81,31 @@ export default function HelpPage() {
   const [formSuccess, setFormSuccess] = useState('');
 
   const messagesEndRef = useRef(null);
+
+  // Synchronize active tab and prefill fields when navigated from notifications or links
+  useEffect(() => {
+    const tabParam = searchParams.get('tab') || location.state?.activeTab || location.state?.tab;
+    if (tabParam === 'create' || tabParam === 'report') {
+      setActiveTab('create');
+      setSelectedTicketId(null);
+    }
+    const catParam = searchParams.get('category') || location.state?.category;
+    if (catParam) {
+      setCategory(catParam);
+    }
+    const subParam = searchParams.get('subject') || location.state?.subject;
+    if (subParam) {
+      setSubject(subParam);
+    }
+    const descParam = searchParams.get('description') || location.state?.description;
+    if (descParam) {
+      setDescription(descParam);
+    }
+    const priorityParam = searchParams.get('priority') || location.state?.priority;
+    if (priorityParam) {
+      setPriority(priorityParam);
+    }
+  }, [location.search, location.state, searchParams]);
 
   // Load customer tickets
   const fetchTickets = async (status = statusFilter, isRefresh = false) => {
@@ -180,12 +209,31 @@ export default function HelpPage() {
       const res = await supportAPI.create({
         subject: subject.trim(),
         category,
-        priority,
+        priority: location.state?.isDebit ? 'urgent' : priority,
         description: description.trim(),
       });
 
       const createdTicket = res.data.ticket;
-      setFormSuccess(`Ticket ${createdTicket.ticketNumber} created successfully! Our team will assist you shortly.`);
+
+      // If user is reporting an unauthorized debit, lock transactions for security
+      if (location.state?.isDebit) {
+        try {
+          await transferAPI.reportTransfer({
+            notificationId: location.state?.notificationId,
+            isDebit: true,
+            reason: `${subject.trim()}: ${description.trim()}`,
+          });
+          window.dispatchEvent(new CustomEvent('flowly:account-suspended'));
+          window.dispatchEvent(new CustomEvent('flowly:account-update'));
+          setFormSuccess(`Ticket ${createdTicket.ticketNumber} created! For your protection, outgoing transactions have been temporarily suspended. Bank staff will review and re-enable transactions.`);
+        } catch (repErr) {
+          console.error('Failed to report transfer on ticket creation:', repErr);
+          setFormSuccess(`Ticket ${createdTicket.ticketNumber} created successfully! Our team will investigate.`);
+        }
+      } else {
+        setFormSuccess(`Ticket ${createdTicket.ticketNumber} created successfully! Our team will assist you shortly.`);
+      }
+
       setSubject('');
       setCategory('other');
       setPriority('medium');
@@ -199,7 +247,7 @@ export default function HelpPage() {
         if (createdTicket?._id) {
           openTicketDetail(createdTicket._id);
         }
-      }, 1200);
+      }, 1500);
     } catch (err) {
       setFormError(err.response?.data?.message || 'Failed to submit ticket. Please check your input.');
     } finally {
@@ -953,6 +1001,54 @@ export default function HelpPage() {
               Provide clear details about the issue you're facing. Our customer support team will investigate and follow up on this thread.
             </p>
           </div>
+
+          {location.state?.fromNotification && (
+            <div
+              style={{
+                padding: '12px 16px',
+                borderRadius: '10px',
+                backgroundColor: '#FAF5FF',
+                border: '1.5px solid #C4B5FD',
+                color: '#5C187B',
+                fontSize: '13.5px',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                marginBottom: '16px',
+              }}
+            >
+              <AlertTriangle size={18} style={{ color: '#DC2626', flexShrink: 0 }} />
+              <div>
+                <span>Reporting an issue linked to notification: </span>
+                <strong style={{ color: '#201530' }}>{location.state.fromNotification}</strong>
+              </div>
+            </div>
+          )}
+
+          {location.state?.isDebit && (
+            <div
+              style={{
+                padding: '12px 16px',
+                borderRadius: '10px',
+                backgroundColor: '#FEF2F2',
+                border: '1.5px solid #FCA5A5',
+                color: '#991B1B',
+                fontSize: '13px',
+                lineHeight: 1.45,
+                marginBottom: '20px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+              }}
+            >
+              <ShieldAlert size={20} color="#DC2626" style={{ flexShrink: 0 }} />
+              <div>
+                <div style={{ fontWeight: 800 }}>Reporting Money Debited: Transactions will be blocked for security</div>
+                <div>Submitting this report will place a security block on your account and pause outgoing money transactions until an authorized bank worker reviews and re-enables transactions from the worker desk.</div>
+              </div>
+            </div>
+          )}
 
           {formSuccess && (
             <div style={{

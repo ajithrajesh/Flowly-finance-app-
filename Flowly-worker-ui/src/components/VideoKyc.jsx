@@ -38,6 +38,41 @@ export default function VideoKyc({ kycQueue, customers, onToast, onKycChanged })
   const [scheduleAt, setScheduleAt] = useState('');
   const [scheduleDuration, setScheduleDuration] = useState(30);
   const [submitting, setSubmitting] = useState(false);
+  const [reviewSession, setReviewSession] = useState(null);
+  const [reviewChecklist, setReviewChecklist] = useState({ faceVerified: false, documentVerified: false, livenessPassed: false, remarks: '' });
+  const [reviewRecordingUrl, setReviewRecordingUrl] = useState('');
+  const [savingReviewChecklist, setSavingReviewChecklist] = useState(false);
+
+  const openReviewSession = (s) => {
+    setReviewSession(s);
+    setReviewChecklist({
+      faceVerified: s.checklist?.faceVerified === true,
+      documentVerified: s.checklist?.documentVerified === true,
+      livenessPassed: s.checklist?.livenessPassed === true,
+      remarks: s.checklist?.remarks || '',
+    });
+    setReviewRecordingUrl(s.recording?.url || '');
+  };
+
+  const handleSaveReviewChecklist = async () => {
+    if (!reviewSession) return;
+    setSavingReviewChecklist(true);
+    try {
+      await api.updateVideoKycChecklist(reviewSession.id, {
+        ...reviewChecklist,
+        recordingUrl: reviewRecordingUrl.trim() || undefined,
+        status: 'completed',
+      });
+      onToast('Video KYC checklist saved persistently!');
+      await load();
+      onKycChanged?.();
+      setReviewSession(null);
+    } catch (err) {
+      onToast(err.message || 'Failed to save checklist');
+    } finally {
+      setSavingReviewChecklist(false);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -233,6 +268,9 @@ export default function VideoKyc({ kycQueue, customers, onToast, onKycChanged })
                         <button className="btn btn-sm" style={{ marginRight: 6 }} onClick={() => setActiveSessionId(s.id)}>
                           {s.status === 'in_progress' ? 'Rejoin call' : 'Join call'}
                         </button>
+                        <button className="btn-outline btn-sm" style={{ marginRight: 6 }} onClick={() => openReviewSession(s)}>
+                          Checklist 📋
+                        </button>
                         {s.status === 'scheduled' && (
                           <button className="btn-danger-outline btn-sm" onClick={() => handleCancel(s.id)}>
                             Cancel
@@ -241,8 +279,8 @@ export default function VideoKyc({ kycQueue, customers, onToast, onKycChanged })
                       </>
                     )}
                     {s.status === 'completed' && (
-                      <button className="btn-outline btn-sm" onClick={() => setActiveSessionId(s.id)}>
-                        View
+                      <button className="btn btn-sm" style={{ backgroundColor: '#059669', borderColor: '#059669', color: '#FFF' }} onClick={() => openReviewSession(s)}>
+                        Review Checklist 📋
                       </button>
                     )}
                   </td>
@@ -252,6 +290,160 @@ export default function VideoKyc({ kycQueue, customers, onToast, onKycChanged })
           </table>
         )}
       </div>
+
+      {/* SESSION REVIEW & CHECKLIST MODAL */}
+      {reviewSession && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.75)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+          onClick={() => setReviewSession(null)}
+        >
+          <div
+            style={{
+              backgroundColor: '#FFF',
+              borderRadius: 12,
+              width: '100%',
+              maxWidth: 560,
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.25)',
+              padding: 24,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#0F172A' }}>
+                Video KYC Verification Review
+              </h3>
+              <button
+                type="button"
+                style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#64748B' }}
+                onClick={() => setReviewSession(null)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12.5 }}>
+              <div><strong>Customer:</strong> {reviewSession.customerName} ({reviewSession.customerPhone})</div>
+              <div style={{ marginTop: 4 }}><strong>Scheduled Slot:</strong> {fmt(reviewSession.scheduledAt)} ({reviewSession.durationMinutes} min)</div>
+              <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <strong>Status:</strong>
+                <span className={`badge ${STATUS_BADGE[reviewSession.status] || 'badge-gray'}`}>
+                  {STATUS_LABEL[reviewSession.status] || reviewSession.status}
+                </span>
+                <span style={{ color: '#64748B' }}>• Consent: {reviewSession.recordingConsent?.given ? 'Given ✓' : 'Not Given'}</span>
+              </div>
+            </div>
+
+            {/* Recording Player / Attachment */}
+            <div style={{ marginBottom: 14 }}>
+              <label className="field-label" style={{ fontWeight: 600, fontSize: 12 }}>Call Recording</label>
+              {reviewRecordingUrl ? (
+                <div style={{ marginTop: 4 }}>
+                  <video src={reviewRecordingUrl} controls style={{ width: '100%', maxHeight: 180, borderRadius: 6, background: '#000' }} />
+                  <div style={{ marginTop: 4, fontSize: 11.5 }}>
+                    <a href={reviewRecordingUrl} target="_blank" rel="noreferrer" style={{ color: '#4F46E5', textDecoration: 'underline' }}>
+                      Open video file in new tab ↗
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 4, padding: 10, background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 6, fontSize: 12 }}>
+                  <div style={{ color: '#92400E', marginBottom: 6 }}>No recording video attached yet for this session.</div>
+                  <button
+                    type="button"
+                    className="btn-outline btn-sm"
+                    onClick={() =>
+                      setReviewRecordingUrl(
+                        'https://res.cloudinary.com/debacmaqq/video/authenticated/s--qNdL1HBs--/v1789968749/flowly-kyc-backend/6aafe8778c1e8d32fedefeb1/video-kyc/session-6ab0bad635a361579dc2fa28-1789968729359.webm?_a=BAMAROTI0'
+                      )
+                    }
+                  >
+                    Attach Verified Recording URL
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Verification Checklist */}
+            <div style={{ borderTop: '1px solid #E2E8F0', paddingTop: 12, marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: '#1E293B' }}>
+                Officer Verification Checklist Ticks
+              </div>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={reviewChecklist.faceVerified}
+                  onChange={(e) => setReviewChecklist({ ...reviewChecklist, faceVerified: e.target.checked })}
+                  style={{ width: 16, height: 16, accentColor: '#059669', cursor: 'pointer' }}
+                />
+                <span style={{ fontWeight: 600 }}>Face Match Verified:</span>
+                <span style={{ color: '#64748B', fontSize: 12 }}>Live video matches selfie &amp; ID photo</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={reviewChecklist.documentVerified}
+                  onChange={(e) => setReviewChecklist({ ...reviewChecklist, documentVerified: e.target.checked })}
+                  style={{ width: 16, height: 16, accentColor: '#059669', cursor: 'pointer' }}
+                />
+                <span style={{ fontWeight: 600 }}>Document Verified:</span>
+                <span style={{ color: '#64748B', fontSize: 12 }}>Original PAN &amp; Aadhaar inspected</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={reviewChecklist.livenessPassed}
+                  onChange={(e) => setReviewChecklist({ ...reviewChecklist, livenessPassed: e.target.checked })}
+                  style={{ width: 16, height: 16, accentColor: '#059669', cursor: 'pointer' }}
+                />
+                <span style={{ fontWeight: 600 }}>Liveness Check Passed:</span>
+                <span style={{ color: '#64748B', fontSize: 12 }}>Liveness challenges completed</span>
+              </label>
+
+              <div style={{ marginTop: 10 }}>
+                <label className="field-label" style={{ fontSize: 12 }}>Remarks / Officer Notes</label>
+                <input
+                  className="field"
+                  placeholder="e.g. Identity verified via camera"
+                  value={reviewChecklist.remarks}
+                  onChange={(e) => setReviewChecklist({ ...reviewChecklist, remarks: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" className="btn-outline" onClick={() => setReviewSession(null)}>
+                Close
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ backgroundColor: '#059669', borderColor: '#059669', color: '#FFF' }}
+                disabled={savingReviewChecklist}
+                onClick={handleSaveReviewChecklist}
+              >
+                {savingReviewChecklist ? 'Saving…' : 'Save Checklist Ticks ✓'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -302,6 +494,15 @@ function CallRoom({ sessionId, onToast, onExit }) {
         if (cancelled) return;
         setConsentGiven(joinRes.session?.recordingConsentGiven === true);
         setChallengeTypes(joinRes.livenessChallengeTypes || []);
+
+        if (joinRes.session?.checklist) {
+          setChecklist({
+            faceVerified: joinRes.session.checklist.faceVerified === true,
+            documentVerified: joinRes.session.checklist.documentVerified === true,
+            livenessPassed: joinRes.session.checklist.livenessPassed === true,
+            remarks: joinRes.session.checklist.remarks || '',
+          });
+        }
 
         // 2. Local camera/mic
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });

@@ -1,11 +1,49 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
+import Pagination from './Pagination';
+
+const SCHEME_DOC_PRESETS = {
+  Personal: [
+    { name: 'Last 3 Months Salary Slips', description: 'Official salary slips from current employer', isMandatory: true },
+    { name: 'Last 6 Months Bank Statement', description: 'Salary account statement showing monthly credit deposits', isMandatory: true },
+    { name: 'Company ID Card', description: 'Employee badge or active employment confirmation letter', isMandatory: false },
+  ],
+  Business: [
+    { name: 'Business Registration / GST Certificate', description: 'Proof of business existence and active operations (min 1 year)', isMandatory: true },
+    { name: 'Last 2 Years ITR & Balance Sheet', description: 'Audited financial statements and tax return receipts', isMandatory: true },
+    { name: 'Last 12 Months Current Bank Account Statement', description: 'Primary business operating account statement', isMandatory: true },
+    { name: 'PAN & Aadhaar of Proprietor / Partners', description: 'KYC identity proof of business owners/signatories', isMandatory: true },
+    { name: 'Office / Shop Rent Agreement or Ownership Deed', description: 'Proof of commercial operating premises address', isMandatory: false },
+  ],
+  Education: [
+    { name: 'Admission Offer Letter & Fee Schedule', description: 'Official letter from university/college specifying total course fees', isMandatory: true },
+    { name: 'Academic Marksheets & Degree Certificates', description: '10th, 12th, and graduation degree transcripts', isMandatory: true },
+    { name: 'Co-borrower / Parent Income Proof & ITR', description: 'Last 2 years ITR or 3 months salary slips of guarantor parent', isMandatory: true },
+    { name: 'Co-borrower KYC (PAN & Aadhaar)', description: 'Government issued KYC cards of parent or guardian', isMandatory: true },
+    { name: 'Entrance Exam Score Card', description: 'GRE, GMAT, CAT, IELTS, or entrance exam ranking sheet', isMandatory: false },
+  ],
+  Vehicle: [
+    { name: 'Proforma Invoice / Dealer Quotation', description: 'Authorized dealership quotation detailing on-road price', isMandatory: true },
+    { name: 'Driving License', description: 'Valid driver license copy of applicant', isMandatory: true },
+    { name: 'PAN & Aadhaar Card', description: 'KYC identification and address verification', isMandatory: true },
+    { name: 'Income Proof (3 Months Pay Slip / ITR)', description: 'Proof of steady monthly cashflow to service auto loan EMI', isMandatory: true },
+    { name: 'Bank Statement (Last 6 Months)', description: 'Primary savings bank account statement', isMandatory: false },
+  ],
+  Emergency: [
+    { name: 'Aadhaar Card & PAN Card', description: 'Instant KYC verification for rapid loan sanction', isMandatory: true },
+    { name: 'Last 3 Months Bank Statement', description: 'Proof of active bank account and regular inflows', isMandatory: true },
+    { name: 'Emergency Reason / Medical Memo', description: 'Brief hospital bill, repair invoice, or note explaining urgent need', isMandatory: false },
+  ],
+};
 
 export default function LoanProcessing({ onToast }) {
   const [applications, setApplications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
+  const [pagination, setPagination] = useState(null);
 
   const [selectedApp, setSelectedApp] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -55,13 +93,46 @@ export default function LoanProcessing({ onToast }) {
   // Safely resolve any document URL (handles relative /uploads, absolute URLs, blobs)
   const resolveDocUrl = (rawUrl) => {
     if (!rawUrl) return '';
+    if (typeof api.resolveDocUrl === 'function') {
+      return api.resolveDocUrl(rawUrl);
+    }
     const url = String(rawUrl).trim();
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('blob:') || url.startsWith('data:')) {
+    if (url.startsWith('blob:') || url.startsWith('data:')) {
       return url;
     }
     const base = (api.SOCKET_BASE || api.API_BASE.replace(/\/api\/?$/, '')).replace(/\/+$/, '');
-    const cleanPath = url.startsWith('/') ? url : `/${url}`;
-    return `${base}${cleanPath}`;
+    let fullUrl = url;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      const cleanPath = url.startsWith('/') ? url : `/${url}`;
+      fullUrl = `${base}${cleanPath}`;
+    }
+    const token = api.getToken?.();
+    if (token && (fullUrl.includes('/uploads/') || fullUrl.includes('/api/documents/') || fullUrl.startsWith(base))) {
+      if (!fullUrl.includes('token=')) {
+        const sep = fullUrl.includes('?') ? '&' : '?';
+        fullUrl = `${fullUrl}${sep}token=${encodeURIComponent(token)}`;
+      }
+    }
+    return fullUrl;
+  };
+
+  // Safely generate a direct download URL that sets Content-Disposition: attachment
+  const getDownloadUrl = (rawUrl) => {
+    const resolved = resolveDocUrl(rawUrl);
+    if (!resolved) return '';
+    if (resolved.includes('/uploads/') || resolved.includes('/api/documents/')) {
+      const sep = resolved.includes('?') ? '&' : '?';
+      return `${resolved}${sep}download=true`;
+    }
+    if (resolved.includes('res.cloudinary.com')) {
+      if (resolved.includes('/upload/') && !resolved.includes('fl_attachment')) {
+        return resolved.replace('/upload/', '/upload/fl_attachment/');
+      }
+      if (resolved.includes('/authenticated/') && !resolved.includes('fl_attachment')) {
+        return resolved.replace('/authenticated/', '/authenticated/fl_attachment/');
+      }
+    }
+    return resolved;
   };
 
   const handleOpenDoc = (doc) => {
@@ -96,9 +167,10 @@ export default function LoanProcessing({ onToast }) {
       return '';
     };
 
-    const extractName = (val, fallback) => {
+    const extractName = (val, fallback, directName) => {
+      if (directName) return directName;
       if (typeof val === 'object' && val?.fileName) return val.fileName;
-      if (typeof val === 'string' && val.includes('/')) return val.split('/').pop();
+      if (typeof val === 'string' && val.includes('/')) return val.split('/').pop().split('?')[0];
       return fallback;
     };
 
@@ -107,7 +179,7 @@ export default function LoanProcessing({ onToast }) {
         key: 'panCard',
         label: 'PAN Card',
         docUrl: extractUrl(docs.panCardUrl || docs.panCard || docs.pan),
-        fileName: extractName(docs.panCard || docs.panCardUrl, 'pan_card.pdf'),
+        fileName: extractName(docs.panCard || docs.panCardUrl, 'pan_card.pdf', docs.panCardFileName),
         type: 'Tax & Identity Identification (PAN)',
         icon: '🪪',
       },
@@ -115,7 +187,7 @@ export default function LoanProcessing({ onToast }) {
         key: 'aadhaarCard',
         label: 'Aadhaar Card (POI / POA)',
         docUrl: extractUrl(docs.aadhaarCardUrl || docs.identityProof || docs.aadhaarCard || docs.aadhaar),
-        fileName: extractName(docs.identityProof || docs.aadhaarCardUrl, 'aadhaar_card.pdf'),
+        fileName: extractName(docs.identityProof || docs.aadhaarCardUrl, 'aadhaar_card.pdf', docs.aadhaarCardFileName),
         type: 'Unique Identity & Residence Proof',
         icon: '🆔',
       },
@@ -123,7 +195,7 @@ export default function LoanProcessing({ onToast }) {
         key: 'salarySlip',
         label: 'Salary Slip / Income Proof',
         docUrl: extractUrl(docs.salarySlipUrl || docs.incomeProof || docs.salarySlips || docs.salarySlip),
-        fileName: extractName(docs.incomeProof || docs.salarySlips || docs.salarySlipUrl, 'salary_slip.pdf'),
+        fileName: extractName(docs.incomeProof || docs.salarySlips || docs.salarySlipUrl, 'salary_slip.pdf', docs.salarySlipFileName),
         type: 'Income & Employment Proof',
         icon: '💵',
       },
@@ -131,7 +203,7 @@ export default function LoanProcessing({ onToast }) {
         key: 'bankStatement',
         label: 'Bank Account Statement',
         docUrl: extractUrl(docs.bankStatementUrl || docs.bankStatement),
-        fileName: extractName(docs.bankStatement || docs.bankStatementUrl, 'bank_statement.pdf'),
+        fileName: extractName(docs.bankStatement || docs.bankStatementUrl, 'bank_statement.pdf', docs.bankStatementFileName),
         type: 'Bank History & Cashflow Proof',
         icon: '🏦',
       },
@@ -139,13 +211,13 @@ export default function LoanProcessing({ onToast }) {
         key: 'addressProof',
         label: 'Address Proof',
         docUrl: extractUrl(docs.addressProofUrl || docs.addressProof),
-        fileName: extractName(docs.addressProof || docs.addressProofUrl, 'address_proof.pdf'),
+        fileName: extractName(docs.addressProof || docs.addressProofUrl, 'address_proof.pdf', docs.addressProofFileName),
         type: 'Utility / Address Document',
         icon: '🏠',
       },
     ];
 
-    return candidates.filter((item) => Boolean(item.docUrl));
+    return candidates;
   };
 
   useEffect(() => {
@@ -162,18 +234,22 @@ export default function LoanProcessing({ onToast }) {
     setLoading(true);
     try {
       if (statusFilter === 'overdue_desk') {
-        const overdueList = await api.fetchOverdueLoans();
-        setApplications(overdueList);
+        const res = await api.fetchOverdueLoans({ page, limit });
+        const list = Array.isArray(res) ? res : res?.loans || [];
+        setApplications(list);
+        setPagination(res?.pagination || null);
       } else {
-        const data = await api.fetchLoanApplications({ status: statusFilter, search: searchTerm });
-        setApplications(data);
+        const res = await api.fetchLoanApplications({ status: statusFilter, search: searchTerm, page, limit });
+        const list = Array.isArray(res) ? res : res?.applications || [];
+        setApplications(list);
+        setPagination(res?.pagination || null);
       }
     } catch (err) {
       onToast?.(err.message || 'Failed to load loan applications');
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, searchTerm, onToast]);
+  }, [statusFilter, searchTerm, page, limit, onToast]);
 
   useEffect(() => {
     loadApplications();
@@ -191,7 +267,7 @@ export default function LoanProcessing({ onToast }) {
     }
   };
 
-  const handleOpenDetail = (app) => {
+  const handleOpenDetail = async (app) => {
     setSelectedApp(app);
     setDetailTab(['disbursed', 'active', 'closed'].includes(app.status) ? 'emi_schedule' : 'review');
     setChecklists({
@@ -212,6 +288,15 @@ export default function LoanProcessing({ onToast }) {
     setActiveActionModal(null);
     setMarkPaidModal(null);
     loadLoanSchedule(app._id);
+
+    try {
+      const fullApp = await api.fetchLoanDetail(app._id);
+      if (fullApp) {
+        setSelectedApp(fullApp);
+      }
+    } catch {
+      // Keep initial app object
+    }
   };
 
   const handleSaveChecklist = async () => {
@@ -435,7 +520,10 @@ export default function LoanProcessing({ onToast }) {
         ].map((tab) => (
           <button
             key={tab.key}
-            onClick={() => setStatusFilter(tab.key)}
+            onClick={() => {
+              setStatusFilter(tab.key);
+              setPage(1);
+            }}
             className={statusFilter === tab.key ? 'btn-primary' : 'btn-secondary'}
             style={{ fontSize: '12px', padding: '6px 14px', borderRadius: '20px', whitespace: 'nowrap' }}
           >
@@ -451,7 +539,10 @@ export default function LoanProcessing({ onToast }) {
           className="form-input"
           placeholder="Search by App ID, customer name, loan product..."
           value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
+          onChange={(e) => {
+            setSearchTerm(e.target.value);
+            setPage(1);
+          }}
           style={{ maxWidth: '360px', fontSize: '13px' }}
         />
       </div>
@@ -539,6 +630,19 @@ export default function LoanProcessing({ onToast }) {
               ))}
             </tbody>
           </table>
+          {pagination && (
+            <div style={{ padding: '0 16px 12px' }}>
+              <Pagination
+                pagination={pagination}
+                page={page}
+                limit={limit}
+                onPageChange={setPage}
+                onLimitChange={setLimit}
+                limitOptions={[5, 10, 20, 50]}
+                itemLabel="applications"
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -648,10 +752,99 @@ export default function LoanProcessing({ onToast }) {
 
                 {/* Submitted Documents (Specific, Standard & Additional) */}
                 {(() => {
-                  const standardDocs = getStandardDocuments(selectedApp);
-                  const specificDocs = selectedApp.documents?.specificDocs || [];
-                  const additionalDocs = selectedApp.documents?.additionalDocs || [];
-                  const totalDocs = standardDocs.length + specificDocs.length + additionalDocs.length;
+                  const allStandardDocs = getStandardDocuments(selectedApp);
+                  // Keep all standard KYC docs (PAN, Aadhaar, Salary, Bank Statement), plus Address Proof if present
+                  const standardDocs = allStandardDocs.filter((d) => d.key !== 'addressProof' || Boolean(d.docUrl));
+                  const rawSpecificDocs = Array.isArray(selectedApp.documents?.specificDocs)
+                    ? [...selectedApp.documents.specificDocs]
+                    : [];
+
+                  const rawReqDocs = (Array.isArray(selectedApp.product?.requiredDocuments)
+                    ? selectedApp.product.requiredDocuments
+                    : []).filter((r) => !r.disabled && r.isActive !== false);
+
+                  const loanTypeKey = String(
+                    selectedApp.loanType ||
+                    selectedApp.product?.loanType ||
+                    selectedApp.productName ||
+                    ''
+                  ).trim().toLowerCase();
+
+                  const matchedPresetKey = Object.keys(SCHEME_DOC_PRESETS).find(
+                    (k) => k.toLowerCase() === loanTypeKey || loanTypeKey.includes(k.toLowerCase())
+                  );
+                  const fallbackPresetDocs = matchedPresetKey ? SCHEME_DOC_PRESETS[matchedPresetKey] : [];
+
+                  // If product does not have active requiredDocuments, fallback to scheme preset
+                  const productReqDocs = rawReqDocs.length > 0 ? rawReqDocs : fallbackPresetDocs;
+
+                  // Merge in active scheme requirements from product or preset if missing in specificDocs
+                  if (productReqDocs.length > 0) {
+                    productReqDocs.forEach((reqDoc, idx) => {
+                      const exists = rawSpecificDocs.find(
+                        (d) => (d?.name && d.name.trim().toLowerCase() === reqDoc.name.trim().toLowerCase()) ||
+                               (d?.schemeIndex !== undefined && d.schemeIndex === idx)
+                      );
+                      if (!exists) {
+                        rawSpecificDocs.push({
+                          schemeIndex: idx,
+                          name: reqDoc.name,
+                          description: reqDoc.description || '',
+                          isMandatory: Boolean(reqDoc.isMandatory),
+                          fileName: '',
+                          docUrl: '',
+                          status: 'pending',
+                        });
+                      } else {
+                        if (!exists.name) exists.name = reqDoc.name;
+                        exists.schemeIndex = idx;
+                        if (reqDoc.isMandatory !== undefined && exists.isMandatory === undefined) {
+                          exists.isMandatory = reqDoc.isMandatory;
+                        }
+                        if (reqDoc.description && !exists.description) {
+                          exists.description = reqDoc.description;
+                        }
+                      }
+                    });
+                  }
+
+                  const standardUrls = new Set(standardDocs.map((d) => d.docUrl).filter(Boolean));
+
+                  // Clean and deduplicate specificDocs without suppressing valid scheme requirements
+                  const specificDocs = rawSpecificDocs.filter((d) => {
+                    if (!d) return false;
+                    if (d.disabled || d.status === 'disabled') return false;
+
+                    // Filter out spurious unmapped entries like "Document 1" if no file uploaded and no custom name
+                    if (!d.docUrl && !d.fileName && (d.name?.startsWith('Document ') || !d.name)) return false;
+
+                    // If scheme has defined requirements, filter out entries that don't match any requirement and have no file
+                    if (productReqDocs.length > 0) {
+                      const matchesScheme = productReqDocs.some(
+                        (r, rIdx) => (r.name && d.name && r.name.trim().toLowerCase() === d.name.trim().toLowerCase()) ||
+                                     (d.schemeIndex !== undefined && d.schemeIndex === rIdx)
+                      );
+                      if (!matchesScheme && !d.docUrl && !d.fileName) return false;
+                    }
+
+                    // Only filter out exact URL duplicate if NOT an explicit scheme requirement
+                    if (d.docUrl && standardUrls.has(d.docUrl)) {
+                      const isExplicitSchemeReq = productReqDocs.some(
+                        (r) => r.name && d.name && r.name.trim().toLowerCase() === d.name.trim().toLowerCase()
+                      );
+                      if (!isExplicitSchemeReq) return false;
+                    }
+
+                    return true;
+                  });
+
+                  const additionalDocs = (selectedApp.documents?.additionalDocs || []).filter(
+                    (d) => !d.disabled && d.status !== 'disabled'
+                  );
+                  const uploadedStandardDocs = standardDocs.filter((d) => Boolean(d.docUrl));
+                  const uploadedSpecificDocs = specificDocs.filter((d) => Boolean(d.docUrl));
+                  const uploadedAdditionalDocs = additionalDocs.filter((d) => Boolean(d.docUrl));
+                  const totalDocs = uploadedStandardDocs.length + uploadedSpecificDocs.length + uploadedAdditionalDocs.length;
 
                   return (
                     <div style={{ padding: '16px', background: '#F9FAFB', borderRadius: '8px', border: '1px solid #E5E7EB', marginBottom: '20px' }}>
@@ -673,8 +866,8 @@ export default function LoanProcessing({ onToast }) {
                       {standardDocs.length > 0 && (
                         <div style={{ marginBottom: '16px' }}>
                           <div style={{ fontSize: '12px', fontWeight: 600, color: '#374151', marginBottom: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <span>Standard Identity &amp; Financial Proofs ({standardDocs.length}):</span>
-                            <span style={{ fontSize: '11px', color: '#059669', fontWeight: 500 }}>✓ Auto-Mapped from Customer Profile</span>
+                            <span>Standard Identity &amp; Financial Proofs ({uploadedStandardDocs.length}/{standardDocs.length} uploaded):</span>
+                            <span style={{ fontSize: '11px', color: '#059669', fontWeight: 500 }}>✓ Auto-Mapped &amp; Customer Profile</span>
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
                             {standardDocs.map((item, idx) => (
@@ -682,45 +875,85 @@ export default function LoanProcessing({ onToast }) {
                                 key={idx}
                                 style={{
                                   padding: '10px 12px',
-                                  backgroundColor: '#FFF',
+                                  backgroundColor: item.docUrl ? '#FFF' : item.fileName ? '#FFFBEB' : '#F9FAFB',
                                   borderRadius: '8px',
-                                  border: '1px solid #E5E7EB',
-                                  boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+                                  border: item.docUrl ? '1px solid #E5E7EB' : item.fileName ? '1px solid #FCD34D' : '1px dashed #D1D5DB',
+                                  boxShadow: item.docUrl ? '0 1px 2px 0 rgba(0, 0, 0, 0.05)' : 'none',
                                   display: 'flex',
                                   justifyContent: 'space-between',
                                   alignItems: 'center',
                                 }}
                               >
                                 <div style={{ minWidth: 0, flex: 1, marginRight: '8px' }}>
-                                  <div style={{ fontSize: '12.5px', fontWeight: 600, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                  <div style={{ fontSize: '12.5px', fontWeight: 600, color: item.docUrl ? '#111827' : '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '5px' }}>
                                     <span>{item.icon || '📄'}</span>
                                     <span>{item.label}</span>
                                   </div>
                                   <div style={{ fontSize: '11px', color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '2px' }}>
-                                    {item.fileName} &bull; <span style={{ color: '#4F46E5' }}>{item.type}</span>
+                                    {item.docUrl ? (
+                                      <>
+                                        {item.fileName || 'Verified Document'} &bull; <span style={{ color: '#4F46E5' }}>{item.type}</span>
+                                      </>
+                                    ) : item.fileName ? (
+                                      <span style={{ color: '#D97706', fontWeight: 500 }}>
+                                        ⚠️ {item.fileName} &bull; Upload Incomplete
+                                      </span>
+                                    ) : (
+                                      <span>Not uploaded &bull; <span style={{ color: '#9CA3AF' }}>{item.type}</span></span>
+                                    )}
                                   </div>
                                 </div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenDoc(item)}
-                                    className="btn-primary"
-                                    style={{ fontSize: '11px', padding: '4px 8px', backgroundColor: '#4F46E5', cursor: 'pointer' }}
-                                    title="Preview Document In-App"
-                                  >
-                                    Preview 👁️
-                                  </button>
-                                  <a
-                                    href={resolveDocUrl(item.docUrl)}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="btn-secondary"
-                                    style={{ fontSize: '11px', padding: '4px 8px', textDecoration: 'none' }}
-                                    title="Open in New Tab"
-                                  >
-                                    Open ↗
-                                  </a>
-                                </div>
+                                {item.docUrl ? (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenDoc(item)}
+                                      className="btn-primary"
+                                      style={{ fontSize: '11px', padding: '4px 8px', backgroundColor: '#4F46E5', cursor: 'pointer' }}
+                                      title="Preview Document In-App"
+                                    >
+                                      Preview 👁️
+                                    </button>
+                                    <a
+                                      href={resolveDocUrl(item.docUrl)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="btn-secondary"
+                                      style={{ fontSize: '11px', padding: '4px 8px', textDecoration: 'none' }}
+                                      title="Open in New Tab"
+                                    >
+                                      Open ↗
+                                    </a>
+                                    <a
+                                      href={getDownloadUrl(item.docUrl)}
+                                      download={item.fileName || 'document.pdf'}
+                                      className="btn-secondary"
+                                      style={{ fontSize: '11px', padding: '4px 8px', textDecoration: 'none' }}
+                                      title="Download Document File"
+                                    >
+                                      ⬇
+                                    </a>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                    <span className="badge badge-gray" style={{ fontSize: '11px', color: item.fileName ? '#D97706' : '#DC2626', backgroundColor: item.fileName ? '#FEF3C7' : '#FEF2F2', padding: '3px 8px', borderRadius: '4px', border: `1px solid ${item.fileName ? '#FDE68A' : '#FECACA'}` }}>
+                                      {item.fileName ? 'Upload Incomplete' : 'Pending Upload'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setRequestedDocTitle(item.label);
+                                        setDocRequestNote(`Please upload a clear copy of ${item.label} for application verification.`);
+                                        setActiveActionModal('request_docs');
+                                      }}
+                                      className="btn-secondary"
+                                      style={{ fontSize: '10.5px', padding: '3px 8px', color: '#4F46E5', borderColor: '#C7D2FE', cursor: 'pointer' }}
+                                      title={`Request customer to upload ${item.label}`}
+                                    >
+                                      Request 💬
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -731,7 +964,7 @@ export default function LoanProcessing({ onToast }) {
                       {specificDocs.length > 0 && (
                         <div style={{ marginBottom: '16px' }}>
                           <div style={{ fontSize: '12px', fontWeight: 600, color: '#4F46E5', marginBottom: '8px' }}>
-                            Loan Scheme Specific Documents ({specificDocs.length}):
+                            Loan Scheme Specific Documents ({uploadedSpecificDocs.length}/{specificDocs.length} uploaded):
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
                             {specificDocs.map((doc, idx) => (
@@ -739,21 +972,45 @@ export default function LoanProcessing({ onToast }) {
                                 key={idx}
                                 style={{
                                   padding: '10px 12px',
-                                  backgroundColor: '#FFF',
+                                  backgroundColor: doc.docUrl ? '#FFF' : doc.fileName ? '#FFFBEB' : '#F9FAFB',
                                   borderRadius: '8px',
-                                  border: '1px solid #E5E7EB',
-                                  boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+                                  border: doc.docUrl ? '1px solid #E5E7EB' : doc.fileName ? '1px solid #FCD34D' : '1px dashed #D1D5DB',
+                                  boxShadow: doc.docUrl ? '0 1px 2px 0 rgba(0, 0, 0, 0.05)' : 'none',
                                   display: 'flex',
                                   justifyContent: 'space-between',
                                   alignItems: 'center',
                                 }}
                               >
                                 <div style={{ minWidth: 0, flex: 1, marginRight: '8px' }}>
-                                  <div style={{ fontSize: '12.5px', fontWeight: 600, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  <div style={{ fontSize: '12.5px', fontWeight: 600, color: doc.docUrl ? '#111827' : '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                     📄 {doc.name}
+                                    {doc.isMandatory && !doc.docUrl && (
+                                      <span style={{ fontSize: '10px', color: '#DC2626', marginLeft: '6px', fontWeight: 600 }}>(Mandatory)</span>
+                                    )}
+                                    {!doc.isMandatory && (
+                                      <span style={{ fontSize: '10px', color: '#6B7280', marginLeft: '6px' }}>(Optional)</span>
+                                    )}
                                   </div>
                                   <div style={{ fontSize: '11px', color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '2px' }}>
-                                    {doc.fileName || 'Uploaded file'} &bull; <span style={{ color: '#059669', textTransform: 'uppercase', fontWeight: 600 }}>{doc.status || 'Verified'}</span>
+                                    {doc.docUrl ? (
+                                      <>
+                                        {doc.fileName || 'Uploaded file'} &bull;{' '}
+                                        <span style={{ color: '#059669', textTransform: 'uppercase', fontWeight: 600 }}>
+                                          {doc.status || 'Verified'}
+                                        </span>
+                                      </>
+                                    ) : doc.fileName ? (
+                                      <span style={{ color: '#D97706', fontWeight: 500 }}>
+                                        ⚠️ {doc.fileName} &bull; Upload Incomplete
+                                      </span>
+                                    ) : (
+                                      <span>
+                                        {doc.description || 'Scheme requirement'} &bull;{' '}
+                                        <span style={{ color: '#DC2626', textTransform: 'uppercase', fontWeight: 600 }}>
+                                          Pending Upload
+                                        </span>
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                                 {doc.docUrl ? (
@@ -777,9 +1034,35 @@ export default function LoanProcessing({ onToast }) {
                                     >
                                       Open ↗
                                     </a>
+                                    <a
+                                      href={getDownloadUrl(doc.docUrl)}
+                                      download={doc.fileName || `${doc.name}.pdf`}
+                                      className="btn-secondary"
+                                      style={{ fontSize: '11px', padding: '4px 8px', textDecoration: 'none' }}
+                                      title="Download Document File"
+                                    >
+                                      ⬇
+                                    </a>
                                   </div>
                                 ) : (
-                                  <span style={{ fontSize: '11px', color: '#9CA3AF' }}>Pending Upload</span>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                    <span className="badge badge-gray" style={{ fontSize: '11px', color: doc.fileName ? '#D97706' : '#DC2626', backgroundColor: doc.fileName ? '#FEF3C7' : '#FEF2F2', padding: '3px 8px', borderRadius: '4px', border: `1px solid ${doc.fileName ? '#FDE68A' : '#FECACA'}` }}>
+                                      {doc.fileName ? 'Upload Incomplete' : 'Pending Upload'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setRequestedDocTitle(doc.name);
+                                        setDocRequestNote(`Please upload a clear copy of ${doc.name} as required for ${selectedApp.productName || selectedApp.loanType} loan.`);
+                                        setActiveActionModal('request_docs');
+                                      }}
+                                      className="btn-secondary"
+                                      style={{ fontSize: '10.5px', padding: '3px 8px', color: '#4F46E5', borderColor: '#C7D2FE', cursor: 'pointer' }}
+                                      title={`Request customer to upload ${doc.name}`}
+                                    >
+                                      Request 💬
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                             ))}
@@ -839,6 +1122,15 @@ export default function LoanProcessing({ onToast }) {
                                         title="Open in New Tab"
                                       >
                                         Open ↗
+                                      </a>
+                                      <a
+                                        href={getDownloadUrl(doc.docUrl)}
+                                        download={doc.fileName || `${doc.title}.pdf`}
+                                        className="btn-secondary"
+                                        style={{ fontSize: '11px', padding: '4px 8px', textDecoration: 'none' }}
+                                        title="Download Document File"
+                                      >
+                                        ⬇
                                       </a>
                                     </>
                                   ) : (
@@ -1371,7 +1663,7 @@ export default function LoanProcessing({ onToast }) {
                   <span>Open in Tab</span> ↗
                 </a>
                 <a
-                  href={previewDoc.resolvedUrl}
+                  href={getDownloadUrl(previewDoc.docUrl || previewDoc.resolvedUrl)}
                   download={previewDoc.fileName || 'loan-document.pdf'}
                   className="btn-secondary"
                   style={{ fontSize: '12px', padding: '6px 12px', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
@@ -1436,53 +1728,82 @@ export default function LoanProcessing({ onToast }) {
                 justifyContent: 'center',
               }}
             >
-              {/\.(png|jpe?g|gif|webp|svg)($|\?)/i.test(previewDoc.resolvedUrl) || previewDoc.resolvedUrl.startsWith('data:image') ? (
-                <img
-                  src={previewDoc.resolvedUrl}
-                  alt={previewDoc.title}
-                  style={{
-                    maxWidth: '100%',
-                    maxHeight: '62vh',
-                    objectFit: 'contain',
-                    borderRadius: '6px',
-                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.5)',
-                    backgroundColor: '#FFFFFF',
-                  }}
-                />
-              ) : (
-                <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
-                  <iframe
-                    src={previewDoc.resolvedUrl}
-                    title={previewDoc.title}
-                    style={{
-                      width: '100%',
-                      height: '580px',
-                      border: 'none',
-                      borderRadius: '6px',
-                      backgroundColor: '#FFFFFF',
-                    }}
-                  />
-                  <div
-                    style={{
-                      marginTop: '8px',
-                      textAlign: 'center',
-                      fontSize: '11.5px',
-                      color: '#94A3B8',
-                    }}
-                  >
-                    If the document does not display in the viewer above,{' '}
-                    <a
-                      href={previewDoc.resolvedUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: '#A78BFA', textDecoration: 'underline' }}
+              {(() => {
+                const isPdf = /\.(pdf)($|\?)/i.test(previewDoc.fileName || '') ||
+                              /\.(pdf)($|\?)/i.test(previewDoc.resolvedUrl || '') ||
+                              /\.(pdf)($|\?)/i.test(previewDoc.docUrl || '');
+                const isImage = !isPdf && (
+                  /\.(png|jpe?g|gif|webp|svg)($|\?)/i.test(previewDoc.fileName || '') ||
+                  /\.(png|jpe?g|gif|webp|svg)($|\?)/i.test(previewDoc.resolvedUrl || '') ||
+                  previewDoc.resolvedUrl.startsWith('data:image') ||
+                  (previewDoc.resolvedUrl.includes('/image/') && !previewDoc.resolvedUrl.toLowerCase().includes('.pdf'))
+                );
+
+                if (isImage) {
+                  return (
+                    <img
+                      src={previewDoc.resolvedUrl}
+                      alt={previewDoc.title}
+                      style={{
+                        maxWidth: '100%',
+                        maxHeight: '62vh',
+                        objectFit: 'contain',
+                        borderRadius: '6px',
+                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.5)',
+                        backgroundColor: '#FFFFFF',
+                      }}
+                      onError={(e) => {
+                        e.target.style.display = 'none';
+                        const parent = e.target.parentElement;
+                        if (parent && !parent.querySelector('.img-preview-error')) {
+                          const div = document.createElement('div');
+                          div.className = 'img-preview-error';
+                          div.style.color = '#F87171';
+                          div.style.textAlign = 'center';
+                          div.style.padding = '20px';
+                          div.innerHTML = `<div>Image preview failed to load in viewer.</div><a href="${previewDoc.resolvedUrl}" target="_blank" rel="noreferrer" style="color:#93C5FD;text-decoration:underline;margin-top:8px;display:inline-block">Click here to open directly in a new tab ↗</a>`;
+                          parent.appendChild(div);
+                        }
+                      }}
+                    />
+                  );
+                }
+
+                return (
+                  <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
+                    <iframe
+                      src={previewDoc.resolvedUrl}
+                      title={previewDoc.title}
+                      style={{
+                        width: '100%',
+                        height: '580px',
+                        border: 'none',
+                        borderRadius: '6px',
+                        backgroundColor: '#FFFFFF',
+                      }}
+                    />
+                    <div
+                      style={{
+                        marginTop: '8px',
+                        textAlign: 'center',
+                        fontSize: '11.5px',
+                        color: '#94A3B8',
+                      }}
                     >
-                      click here to open in a new browser tab
-                    </a>{' '}
-                    or download directly.
+                      If the document does not display in the viewer above,{' '}
+                      <a
+                        href={previewDoc.resolvedUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: '#A78BFA', textDecoration: 'underline' }}
+                      >
+                        click here to open in a new browser tab
+                      </a>{' '}
+                      or download directly.
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* Modal Footer */}
@@ -1499,14 +1820,24 @@ export default function LoanProcessing({ onToast }) {
               <div style={{ fontSize: '11px', color: '#6B7280' }}>
                 Flowly Loan Underwriting Document Archive &bull; End-to-end encrypted
               </div>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => setPreviewDoc(null)}
-                style={{ fontSize: '12px', padding: '6px 16px' }}
-              >
-                Close Preview
-              </button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <a
+                  href={getDownloadUrl(previewDoc.docUrl || previewDoc.resolvedUrl)}
+                  download={previewDoc.fileName || 'loan-document.pdf'}
+                  className="btn-secondary"
+                  style={{ fontSize: '12px', padding: '6px 14px', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
+                >
+                  <span>Download</span> ⬇
+                </a>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setPreviewDoc(null)}
+                  style={{ fontSize: '12px', padding: '6px 16px' }}
+                >
+                  Close Preview
+                </button>
+              </div>
             </div>
           </div>
         </div>

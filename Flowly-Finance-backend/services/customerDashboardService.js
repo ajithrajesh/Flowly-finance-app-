@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import User from "../models/User.js";
 import Account from "../models/Account.js";
 import LoanApplication from "../models/LoanApplication.js";
@@ -6,7 +7,7 @@ import TransactionBucket from "../models/TransactionBucket.js";
 import Notification from "../models/Notification.js";
 
 class CustomerDashboardService {
-  async getDashboardData(userId) {
+  async getDashboardData(userId, options = {}) {
     const user = await User.findById(userId).lean();
 
     if (!user) {
@@ -15,12 +16,15 @@ class CustomerDashboardService {
       throw err;
     }
 
-    const [accounts, activeLoan, activeFDs, recentTransactions, notifications, financialOverview] =
+    const page = Math.max(1, parseInt(options?.page, 10) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(options?.limit, 10) || 5));
+
+    const [accounts, activeLoan, activeFDs, recentTxResult, notifications, financialOverview] =
       await Promise.all([
         this.getAccountSummary(userId),
         this.getActiveLoanAndEmi(userId),
         this.getActiveFDs(userId),
-        this.getRecentTransactions(userId, 10),
+        this.getRecentTransactions(userId, { page, limit }),
         this.getNotifications(userId, 5),
         this.getFinancialOverview(userId),
       ]);
@@ -43,7 +47,23 @@ class CustomerDashboardService {
         activeCount: financialOverview.activeFDCount,
         list: activeFDs,
       },
-      recentTransactions,
+      recentTransactions: recentTxResult?.transactions || [],
+      recentTransactionsPagination: recentTxResult?.pagination || {
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPrevPage: false,
+      },
+      pagination: recentTxResult?.pagination || {
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPrevPage: false,
+      },
       notifications,
       financialOverview,
       timestamp: new Date(),
@@ -153,31 +173,64 @@ class CustomerDashboardService {
     }
   }
 
-  async getRecentTransactions(userId, limit = 10) {
+  async getRecentTransactions(userId, optionsOrLimit = 5, pageNum = 1) {
     try {
+      let page = 1;
+      let limit = 5;
+
+      if (typeof optionsOrLimit === "object" && optionsOrLimit !== null) {
+        page = Math.max(1, parseInt(optionsOrLimit.page, 10) || 1);
+        limit = Math.max(1, Math.min(100, parseInt(optionsOrLimit.limit, 10) || 5));
+      } else {
+        limit = Math.max(1, Math.min(100, parseInt(optionsOrLimit, 10) || 5));
+        page = Math.max(1, parseInt(pageNum, 10) || 1);
+      }
+
+      const skip = (page - 1) * limit;
+
       const accounts = await Account.find({ user: userId }).select("_id").lean();
       const accountIds = accounts.map((acc) => acc._id);
 
-      const transactions = await TransactionBucket.aggregate([
-        { $match: { account: { $in: accountIds } } },
+      const userObjId = mongoose.Types.ObjectId.isValid(userId)
+        ? new mongoose.Types.ObjectId(userId)
+        : userId;
+
+      const matchFilter = accountIds.length > 0
+        ? { $or: [{ account: { $in: accountIds } }, { user: userObjId }] }
+        : { user: userObjId };
+
+      const [result] = await TransactionBucket.aggregate([
+        { $match: matchFilter },
         { $unwind: "$entries" },
         { $sort: { "entries.postedAt": -1 } },
-        { $limit: limit },
         {
-          $project: {
-            _id: "$entries._id",
-            type: "$entries.type",
-            amount: "$entries.amount",
-            date: "$entries.postedAt",
-            description: "$entries.description",
-            refType: "$entries.refType",
-            refId: "$entries.refId",
-            meta: "$entries.meta",
+          $facet: {
+            metadata: [{ $count: "total" }],
+            data: [
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $project: {
+                  _id: "$entries._id",
+                  type: "$entries.type",
+                  amount: "$entries.amount",
+                  date: "$entries.postedAt",
+                  description: "$entries.description",
+                  refType: "$entries.refType",
+                  refId: "$entries.refId",
+                  meta: "$entries.meta",
+                },
+              },
+            ],
           },
         },
       ]);
 
-      return transactions.map((txn) => ({
+      const total = result?.metadata?.[0]?.total || 0;
+      const totalPages = Math.ceil(total / limit) || 0;
+      const rawTxns = result?.data || [];
+
+      const transactions = rawTxns.map((txn) => ({
         id: txn._id,
         type: txn.type,
         amount: txn.amount,
@@ -191,9 +244,33 @@ class CustomerDashboardService {
         receiptNumber: txn.meta?.receiptNumber || null,
         balanceAfter: txn.meta?.balanceAfter || null,
       }));
+
+      const pagination = {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      };
+
+      return {
+        transactions,
+        pagination,
+      };
     } catch (error) {
       console.error("Recent Transactions Error:", error);
-      return [];
+      return {
+        transactions: [],
+        pagination: {
+          total: 0,
+          page: 1,
+          limit: 5,
+          totalPages: 0,
+          hasNextPage: false,
+          hasPrevPage: false,
+        },
+      };
     }
   }
 

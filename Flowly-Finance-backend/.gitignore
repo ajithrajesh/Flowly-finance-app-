@@ -13,6 +13,8 @@ coverage/
 
 # Uploads & temporary scratch
 scratch/
+uploads/additional-doc-*
+uploads/loan-*
 
 # Logs
 logs/

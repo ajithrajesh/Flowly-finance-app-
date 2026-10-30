@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Navbar from './components/Navbar';
 import Footer from './components/Footer';
@@ -16,6 +16,7 @@ import RepaymentsPage from './pages/RepaymentsPage';
 import CalculatorsPage from './pages/CalculatorsPage';
 import HelpPage from './pages/HelpPage';
 import TransferPage from './pages/TransferPage';
+import ProfilePage from './pages/ProfilePage';
 import { notificationsAPI } from './services/api';
 
 // Protected Route Guard
@@ -43,12 +44,13 @@ const ProtectedRoute = ({ children }) => {
   return children;
 };
 
-import { Bell, X, ExternalLink } from 'lucide-react';
+import { Bell, X, ExternalLink, AlertTriangle } from 'lucide-react';
 
 const AppContent = () => {
   const { isAuthenticated, unreadCount, refreshUnreadCount } = useAuth();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [activeToast, setActiveToast] = useState(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     const handleNewNotif = (e) => {
@@ -141,26 +143,74 @@ const AppContent = () => {
             >
               {activeToast.message}
             </p>
-            <button
-              onClick={() => {
-                setActiveToast(null);
-                setNotificationsOpen(true);
-              }}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#5C187B',
-                fontSize: '11px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-                padding: 0,
-              }}
-            >
-              Open notifications <ExternalLink size={11} />
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+              <button
+                onClick={() => {
+                  setActiveToast(null);
+                  setNotificationsOpen(true);
+                }}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#5C187B',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: 0,
+                }}
+              >
+                Open notifications <ExternalLink size={11} />
+              </button>
+              <button
+                onClick={() => {
+                  const toast = activeToast;
+                  setActiveToast(null);
+                  let category = 'other';
+                  if (toast.type === 'kyc') category = 'kyc';
+                  else if (toast.type === 'loan' || toast.type === 'emi') category = 'loan';
+                  else if (['transfer', 'deposit', 'withdrawal', 'payment'].includes(toast.type)) category = 'payment';
+                  else if (toast.type === 'account') category = 'account';
+
+                  const notifTitle = toast.title || 'Notification';
+                  const notifMessage = toast.message || '';
+                  const notifTime = toast.createdAt ? new Date(toast.createdAt).toLocaleString() : new Date().toLocaleString();
+
+                  let subject = `Issue regarding notification: ${notifTitle}`;
+                  if (subject.length > 120) subject = subject.slice(0, 117) + '...';
+
+                  navigate('/help?tab=create', {
+                    state: {
+                      activeTab: 'create',
+                      tab: 'create',
+                      category,
+                      priority: toast.type === 'transfer' ? 'high' : 'medium',
+                      subject,
+                      description: `Regarding notification: "${notifTitle}"\nNotification message: ${notifMessage}\nDate: ${notifTime}\n\nPlease describe the issue or problem you encountered:\n`,
+                      notificationId: toast._id || toast.id,
+                      fromNotification: notifTitle,
+                    },
+                  });
+                }}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#DC2626',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '3px',
+                  padding: 0,
+                }}
+                title="Report a problem regarding this notification"
+              >
+                <AlertTriangle size={11} /> Report
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -244,6 +294,14 @@ const AppContent = () => {
             element={
               <ProtectedRoute>
                 <HelpPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/profile"
+            element={
+              <ProtectedRoute>
+                <ProfilePage />
               </ProtectedRoute>
             }
           />

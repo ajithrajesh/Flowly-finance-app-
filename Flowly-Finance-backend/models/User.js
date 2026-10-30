@@ -91,6 +91,16 @@ const userSchema = new mongoose.Schema(
       default: "",
     },
 
+    profileImage: {
+      type: String,
+      default: "",
+    },
+
+    avatar: {
+      type: String,
+      default: "",
+    },
+
     kycStatus: {
       type: String,
       enum: ["pending", "under_verification", "verified", "rejected"],

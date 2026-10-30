@@ -1,9 +1,10 @@
-export const successResponse = (res, { data = null, message = "Success" } = {}, statusCode = 200) => {
+export const successResponse = (res, { data = null, message = "Success", ...rest } = {}, statusCode = 200) => {
   return res.status(statusCode).json({
     success: true,
     statusCode,
     message,
     data,
+    ...rest,
     timestamp: new Date(),
   });
 };

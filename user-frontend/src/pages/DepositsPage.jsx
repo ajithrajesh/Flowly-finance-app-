@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { depositsAPI, getErrorMessage } from '../services/api';
+import { depositsAPI, getErrorMessage, resolveDocUrl } from '../services/api';
 import { 
   Landmark, 
   PlusCircle, 
@@ -616,7 +616,7 @@ const DepositsPage = () => {
                 {/* Download Certificate PDF Button */}
                 {fd.certificateUrl && (
                   <a
-                    href={fd.certificateUrl}
+                    href={resolveDocUrl(fd.certificateUrl)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="btn-secondary"

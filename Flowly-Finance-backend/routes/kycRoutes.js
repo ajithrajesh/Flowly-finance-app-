@@ -8,6 +8,7 @@ import {
   approveKyc,
   rejectKyc,
   retryKycOcr,
+  updateKycVideoChecklist,
 } from "../controllers/kycController.js";
 import { protect, authorize } from "../middleware/authMiddleware.js";
 import { uploadKycFiles } from "../middleware/uploadMiddleware.js";
@@ -31,6 +32,7 @@ router.get("/:id", protect, authorize("worker", "admin"), getKycDetail);
 router.put("/:id/start-review", protect, authorize("worker", "admin"), startKycReview);
 router.put("/:id/approve", protect, authorize("worker", "admin"), approveKyc);
 router.put("/:id/reject", protect, authorize("worker", "admin"), rejectKyc);
+router.put("/:id/video-checklist", protect, authorize("worker", "admin"), updateKycVideoChecklist);
 router.post("/:id/ocr/retry", protect, authorize("worker", "admin"), retryKycOcr);
 
 export default router;

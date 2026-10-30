@@ -80,3 +80,88 @@ export const uploadFDSupportingDoc = (req, res, next) => {
     return res.status(400).json({ success: false, message });
   });
 };
+
+// Avatar / Profile photo upload (max 5MB, JPG/PNG/WEBP/GIF)
+const avatarUpload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (imageOnlyTypes.includes(file.mimetype) || file.mimetype === "image/gif") {
+      cb(null, true);
+    } else {
+      cb(new Error("Profile photo must be a JPG, PNG, WEBP, or GIF image"));
+    }
+  },
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+});
+
+export const uploadAvatarFile = (req, res, next) => {
+  avatarUpload.any()(req, res, (err) => {
+    if (err) {
+      let message = err.message;
+      if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+        message = "Profile image must be 5 MB or smaller";
+      }
+      return res.status(400).json({ success: false, message });
+    }
+    if (req.files && req.files.length > 0) {
+      req.file = req.files[0];
+    }
+    next();
+  });
+};
+
+// Loan application documents upload (PAN, Aadhaar, salary slip, bank statement, scheme-specific docs)
+const loanDocsUpload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 }, // 10MB per file, up to 10 files
+});
+
+export const uploadLoanFiles = (req, res, next) => {
+  loanDocsUpload.any()(req, res, (err) => {
+    if (err) {
+      let message = err.message;
+      if (err instanceof multer.MulterError) {
+        message =
+          err.code === "LIMIT_FILE_SIZE"
+            ? "Each loan document must be 10 MB or smaller"
+            : `Upload error: ${err.message}`;
+      }
+      return res.status(400).json({ success: false, message });
+    }
+
+    // Map files both by fieldname (for named inputs) and array (for iterate)
+    const filesByField = {};
+    if (Array.isArray(req.files)) {
+      for (const file of req.files) {
+        if (!filesByField[file.fieldname]) {
+          filesByField[file.fieldname] = [file];
+        } else {
+          filesByField[file.fieldname].push(file);
+        }
+      }
+    }
+    req.filesByField = filesByField;
+    next();
+  });
+};
+
+// Loan additional document re-submission
+export const uploadLoanSupportingDoc = (req, res, next) => {
+  loanDocsUpload.any()(req, res, (err) => {
+    if (err) {
+      let message = err.message;
+      if (err instanceof multer.MulterError) {
+        message =
+          err.code === "LIMIT_FILE_SIZE"
+            ? "Supporting document must be 10 MB or smaller"
+            : `Upload error: ${err.message}`;
+      }
+      return res.status(400).json({ success: false, message });
+    }
+    if (req.files && req.files.length > 0) {
+      req.file = req.files[0];
+    }
+    next();
+  });
+};

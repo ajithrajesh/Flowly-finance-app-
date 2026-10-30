@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import { getJwtSecret } from "../config/jwt.js";
 
 export const protect = async (req, res, next) => {
   try {
@@ -20,7 +21,16 @@ export const protect = async (req, res, next) => {
       });
     }
 
-    const secret = process.env.JWT_SECRET || "flowly_secret_key_12345";
+    let secret;
+    try {
+      secret = getJwtSecret();
+    } catch (configError) {
+      console.error("JWT Configuration Error in protect middleware:", configError.message);
+      return res.status(500).json({
+        message: "Internal authentication configuration error. Contact server administrator.",
+      });
+    }
+
     const decoded = jwt.verify(token, secret);
 
     const user = await User.findById(decoded.id).select("-password -pinHash");
@@ -84,3 +94,44 @@ export const authorize = (...roles) => {
 
 export const requireAuth = protect;
 export const requireRole = (roles) => authorize(roles);
+
+/**
+ * Optional authentication middleware:
+ * Populates req.user if a valid token is present; leaves req.user = null otherwise.
+ */
+export const optionalAuth = async (req, res, next) => {
+  try {
+    let token;
+
+    if (
+      req.headers.authorization &&
+      req.headers.authorization.startsWith("Bearer")
+    ) {
+      token = req.headers.authorization.split(" ")[1];
+    } else if (req.query && req.query.token) {
+      token = req.query.token;
+    }
+
+    if (!token) {
+      req.user = null;
+      return next();
+    }
+
+    let secret;
+    try {
+      secret = getJwtSecret();
+    } catch {
+      req.user = null;
+      return next();
+    }
+
+    const decoded = jwt.verify(token, secret);
+
+    const user = await User.findById(decoded.id).select("-password -pinHash");
+    req.user = user || null;
+    next();
+  } catch {
+    req.user = null;
+    next();
+  }
+};

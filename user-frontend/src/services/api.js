@@ -12,6 +12,31 @@ export const SOCKET_BASE =
     ? 'http://localhost:5000'
     : 'https://16.178.31.55.sslip.io');
 
+/**
+ * Safely resolves document URLs (relative /uploads, absolute, blob) and automatically
+ * appends customer authentication token for previewing and downloading secure documents.
+ */
+export const resolveDocUrl = (rawUrl) => {
+  if (!rawUrl) return '';
+  let url = String(rawUrl).trim();
+  if (url.startsWith('blob:') || url.startsWith('data:')) {
+    return url;
+  }
+  const base = (SOCKET_BASE || API_BASE.replace(/\/api\/?$/, '')).replace(/\/+$/, '');
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    const cleanPath = url.startsWith('/') ? url : `/${url}`;
+    url = `${base}${cleanPath}`;
+  }
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('flowly_token') : null;
+  if (token && (url.includes('/uploads/') || url.includes('/api/documents/') || url.startsWith(base))) {
+    if (!url.includes('token=')) {
+      const sep = url.includes('?') ? '&' : '?';
+      url = `${url}${sep}token=${encodeURIComponent(token)}`;
+    }
+  }
+  return url;
+};
+
 const API = axios.create({
   baseURL: API_BASE,
   headers: {
@@ -19,11 +44,19 @@ const API = axios.create({
   },
 });
 
-// Request Interceptor to attach Authorization Token
+// Request Interceptor to attach Authorization Token and handle FormData boundaries
 API.interceptors.request.use((config) => {
   const token = localStorage.getItem('flowly_token');
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  if (config.data instanceof FormData) {
+    // Crucial: remove application/json header so the browser/Axios computes
+    // 'multipart/form-data; boundary=----WebKitFormBoundary...' with the correct boundary
+    if (config.headers) {
+      delete config.headers['Content-Type'];
+      delete config.headers['content-type'];
+    }
   }
   return config;
 }, (error) => Promise.reject(error));
@@ -108,6 +141,12 @@ export const authAPI = {
   googleAuth: (data) => API.post('/auth/google', data),
   getGoogleClientId: () => API.get('/auth/google/client-id'),
   getMe: () => API.get('/auth/me'),
+  updateProfile: (data) => API.put('/auth/profile', data),
+  uploadAvatar: (formData) => {
+    const headers = formData instanceof FormData ? { 'Content-Type': 'multipart/form-data' } : {};
+    return API.post('/auth/profile/avatar', formData, { headers });
+  },
+  removeAvatar: () => API.delete('/auth/profile/avatar'),
 };
 
 // KYC Verification Endpoints
@@ -163,9 +202,19 @@ export const walletAPI = {
 // Loan Catalog & Application Endpoints
 export const loansAPI = {
   getProducts: () => API.get('/loans/products'),
-  applyLoan: (data) => API.post('/loans/apply', data),
+  applyLoan: (data) => {
+    const config = data instanceof FormData ? { headers: { 'Content-Type': undefined } } : {};
+    return API.post('/loans/apply', data, config);
+  },
   getMyApplications: () => API.get('/loans/my-applications'),
-  resubmitDocuments: (id, data) => API.post(`/loans/applications/${id}/resubmit-documents`, data),
+  resubmitDocuments: (id, data) => {
+    const config = data instanceof FormData ? { headers: { 'Content-Type': undefined } } : {};
+    return API.post(`/loans/applications/${id}/resubmit-documents`, data, config);
+  },
+  updateDocuments: (id, data) => {
+    const config = data instanceof FormData ? { headers: { 'Content-Type': undefined } } : {};
+    return API.put(`/loans/applications/${id}/documents`, data, config);
+  },
   acceptSanction: (id) => API.post(`/loans/applications/${id}/accept-sanction`),
   esignAgreement: (id, data) => API.post(`/loans/applications/${id}/esign`, data),
 };
@@ -192,11 +241,14 @@ export const repaymentsAPI = {
 
 // Customer Dashboard Metrics Endpoints
 export const dashboardAPI = {
-  getDashboard: () => API.get('/customer/dashboard'),
+  getDashboard: (params) => API.get('/customer/dashboard', { params }),
   getAccountSummary: () => API.get('/customer/dashboard/account-summary'),
   getActiveLoan: () => API.get('/customer/dashboard/active-loan'),
   getActiveFDs: () => API.get('/customer/dashboard/active-fds'),
-  getRecentTransactions: (limit = 10) => API.get(`/customer/dashboard/recent-transactions?limit=${limit}`),
+  getRecentTransactions: (page = 1, limit = 5) => {
+    const params = typeof page === 'object' && page !== null ? page : { page, limit };
+    return API.get('/customer/dashboard/recent-transactions', { params });
+  },
   getNotifications: (limit = 5) => API.get(`/customer/dashboard/notifications?limit=${limit}`),
   getFinancialOverview: () => API.get('/customer/dashboard/financial-overview'),
 };

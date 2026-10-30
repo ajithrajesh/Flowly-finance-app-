@@ -76,13 +76,13 @@ export const getParticipantRole = (session, user) => {
   if (!session || !user) return null;
   const userId = idOf(user);
   if (idOf(session.customer) === userId) return "customer";
-  if (idOf(session.officer) === userId || user.role === "admin") return "officer";
+  if (idOf(session.officer) === userId || user.role === "admin" || user.role === "worker") return "officer";
   return null;
 };
 
-/** Officer-side actions: the assigned officer or any admin */
+/** Officer-side actions: the assigned officer, any authorized worker, or any admin */
 export const isSessionOfficer = (session, user) =>
-  Boolean(user) && (user.role === "admin" || idOf(session.officer) === idOf(user));
+  Boolean(user) && (user.role === "admin" || user.role === "worker" || idOf(session.officer) === idOf(user));
 
 export const validateScheduledAt = (value, now = new Date()) => {
   if (!value) return { ok: false, message: "scheduledAt is required (ISO date-time)" };
